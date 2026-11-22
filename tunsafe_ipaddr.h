@@ -30,6 +30,9 @@ char *PrintIpAddr(const IpAddr &addr, char buf[kSizeOfAddress]);
 char *PrintWgCidrAddr(const WgCidrAddr &addr, char buf[kSizeOfAddress]);
 bool ParseCidrAddr(const char *s, WgCidrAddr *out);
 
+// 严格解析 1..65535 的端口，避免 atoi 把非法输入当成 0。
+bool ParsePortNumber(const char *s, uint16 *port);
+
 bool IsWgCidrAddrSubsetOfAny(const WgCidrAddr &inner, const std::vector<WgCidrAddr> &addr);
 
 enum {

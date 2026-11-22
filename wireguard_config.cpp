@@ -10,6 +10,8 @@
 #include <vector>
 #include <stdarg.h>
 
+static void AddEndpointExcludedIp(WireguardProcessor *wg, const IpAddr &sin);
+
 class WgFileParser {
 public:
   WgFileParser(WireguardProcessor *wg, DnsResolver *resolver) : wg_(wg), dns_resolver_(resolver) {}
@@ -198,9 +200,18 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
     } else if (strcmp(key, "ExcludedIPs") == 0) {
       SplitString(value, ',', &ss);
       for (size_t i = 0; i < ss.size(); i++) {
-        if (!ParseCidrAddr(ss[i], &addr))
-          return false;
-        wg_->AddExcludedIp(addr);
+        if (ParseCidrAddr(ss[i], &addr)) {
+          wg_->AddExcludedIp(addr);
+          continue;
+        }
+        // ExcludedIPs 也允许写域名。配置加载阶段默认路由还没有指向 TUN，
+        // 此时解析域名是安全的；多 A 记录当前只取第一个。
+        IpAddr sin;
+        if (!ParseSockaddrInWithoutPort(ss[i], &sin, dns_resolver_, kParseSockaddrDontDoNAT64)) {
+          RERROR("ExcludedIPs 无法解析: %s", ss[i]);
+          continue;
+        }
+        AddEndpointExcludedIp(wg_, sin);
       }
     } else {
       goto err;
@@ -237,13 +248,13 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
     } else if (strcmp(key, "Endpoint") == 0) {
       int proto = kPacketProtocolUdp;
       const char* hostname = value;
-      hostname = value;
       if (strncmp(value, "tcp://", 6) == 0) {
         value += 6;
         proto = kPacketProtocolTcp;
       }
       if (!ParseSockaddrInWithPort(value, &sin, dns_resolver_))
         return false;
+      AddEndpointExcludedIp(wg_, sin);
       peer_->SetEndpoint(proto, sin, hostname);
     } else if (strcmp(key, "PersistentKeepalive") == 0) {
       if (!peer_->SetPersistentKeepalive(atoi(value)))
@@ -290,6 +301,17 @@ static bool ContainsNonAsciiCharacter(const char *buf, size_t size) {
       return true;
   }
   return false;
+}
+
+// Endpoint 必须走物理网关；否则 AllowedIPs=0.0.0.0/0 会把握手包
+// 也送进尚未建立的隧道。当前只自动排除 IPv4，IPv6 排除路由尚未实现。
+static void AddEndpointExcludedIp(WireguardProcessor *wg, const IpAddr &sin) {
+  if (sin.sin.sin_family != AF_INET)
+    return;
+  WgCidrAddr addr = {0};
+  addr.size = addr.cidr = 32;
+  memcpy(addr.addr, &sin.sin.sin_addr, 4);
+  wg->AddExcludedIp(addr);
 }
 
 bool ParseWireGuardConfigString(WireguardProcessor *wg, const char *bufin, size_t buf_size, DnsResolver *dns_resolver) {
@@ -506,13 +528,18 @@ bool WgConfig::HandleConfigurationProtocolMessage(WireguardProcessor *proc, cons
           if (!ParseHexString(value, buf32, 32)) goto getout_fail;
           peer->SetPresharedKey(buf32);
         } else if (strcmp(key, "endpoint") == 0) {
-          const char* hostname = value;
-          std::string modified_hostname(hostname); 
-          if (strncmp(modified_hostname.c_str(), "tcp://", 6) == 0) {
-        	modified_hostname = modified_hostname.substr(6); 
+          // 先剥离 tcp:// 再解析，并按前缀设置协议。
+          // 原来把带 tcp:// 的原始字符串传给 ParseSockaddrInWithPort，
+          // 会把 "tcp" 当主机名导致解析失败，且协议被固定为 UDP。
+          int proto = kPacketProtocolUdp;
+          std::string hostport(value);
+          if (hostport.rfind("tcp://", 0) == 0) {
+            proto = kPacketProtocolTcp;
+            hostport = hostport.substr(6);
           }
-          if (!ParseSockaddrInWithPort(value, &sin, NULL)) goto getout_fail;
-          peer->SetEndpoint(kPacketProtocolUdp, sin, modified_hostname.c_str());
+          if (!ParseSockaddrInWithPort(hostport.c_str(), &sin, NULL)) goto getout_fail;
+          AddEndpointExcludedIp(proc, sin);
+          peer->SetEndpoint(proto, sin, hostport.c_str());
         } else if (strcmp(key, "persistent_keepalive_interval") == 0) {
           if (!peer->SetPersistentKeepalive(atoi(value)))
             goto getout_fail;

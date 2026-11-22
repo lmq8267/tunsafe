@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <time.h>
 #include <string>
 
 #if defined(OS_POSIX)
@@ -247,29 +248,51 @@ Logger *g_logger;
 #undef void 
 
 extern void (*g_logger)(int level, const char *msg);  
-void RERROR_(const char *file, int line, const char *msg, ...) {
-  va_list va;
-  char buf[512];           
-  char final_buf[1024];    
-  char time_str[64];       
-  const char *filename;
-
+// localtime() 不是线程安全的，而日志会在网络线程等多个线程输出。
+// 这里统一用 localtime_r/localtime_s，并集中处理时间、文件名和行号，
+// 避免两条日志同时调用 localtime 时出现数据竞争。
+static void FormatLogLine(char *final_buf, size_t final_size, const char *file,
+                          int line, const char *level, const char *msg) {
+  char time_str[64] = "";
   time_t now = time(nullptr);
-  struct tm *lt = localtime(&now);
-  strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", lt);  
+  struct tm tm_buf;
+  struct tm *lt;
+#if defined(OS_WIN)
+  localtime_s(&tm_buf, &now);
+  lt = &tm_buf;
+#else
+  lt = localtime_r(&now, &tm_buf);
+#endif
+  if (lt)
+    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", lt);
 
   const char *slash1 = strrchr(file, '/');
   const char *slash2 = strrchr(file, '\\');
-  filename = (slash1 > slash2) ? slash1 + 1 : (slash2 ? slash2 + 1 : file);
+  const char *filename;
+  // 空指针不能参与关系比较，按“优先取路径分隔符中更靠后的一个”处理。
+  if (slash1 && (!slash2 || slash1 > slash2))
+    filename = slash1 + 1;
+  else if (slash2)
+    filename = slash2 + 1;
+  else
+    filename = file;
+
+  snprintf(final_buf, final_size, "%s [%s:%d]%s: %s", time_str, filename, line, level, msg);
+}
+
+void RERROR_(const char *file, int line, const char *msg, ...) {
+  va_list va;
+  char buf[512];
+  char final_buf[1024];
 
   va_start(va, msg);
   vsnprintf(buf, sizeof(buf), msg, va);
   va_end(va);
 
-  snprintf(final_buf, sizeof(final_buf), "%s [%s:%d]Error: %s", time_str, filename, line, buf);
+  FormatLogLine(final_buf, sizeof(final_buf), file, line, "Error", buf);
 
   if (g_logger) {
-    g_logger(1, final_buf);  
+    g_logger(1, final_buf);
   } else {
     fputs(final_buf, stderr);
     fputs("\n", stderr);
@@ -280,25 +303,15 @@ void RINFO_(const char *file, int line, const char *msg, ...) {
   va_list va;
   char buf[512];
   char final_buf[1024];
-  char time_str[64];
-  const char *filename;
-
-  time_t now = time(nullptr);
-  struct tm *lt = localtime(&now);
-  strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", lt);
-
-  const char *slash1 = strrchr(file, '/');
-  const char *slash2 = strrchr(file, '\\');
-  filename = (slash1 > slash2) ? slash1 + 1 : (slash2 ? slash2 + 1 : file);
 
   va_start(va, msg);
   vsnprintf(buf, sizeof(buf), msg, va);
   va_end(va);
 
-  snprintf(final_buf, sizeof(final_buf), "%s [%s:%d]: %s", time_str, filename, line, buf);
+  FormatLogLine(final_buf, sizeof(final_buf), file, line, "", buf);
 
   if (g_logger) {
-    g_logger(0, final_buf); 
+    g_logger(0, final_buf);
   } else {
     fputs(final_buf, stderr);
     fputs("\n", stderr);

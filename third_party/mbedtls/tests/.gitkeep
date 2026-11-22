@@ -1,0 +1,2 @@
+# 占位文件：mbedTLS 的 library/Makefile 在 static 目标中会 cd ../tests 写入 seedfile，
+# 即使不构建测试也需要该目录存在。这里保留一个空目录，避免 make lib 失败。

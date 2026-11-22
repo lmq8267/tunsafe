@@ -424,6 +424,7 @@ UdpSocketBsd::UdpSocketBsd(NetworkBsd *network, WireguardProcessor *processor)
     : BaseSocketBsd(network),
       udp_readable_(false),
       udp_writable_(false),
+      udp_family_(0),
       udp_queue_(NULL),
       udp_queue_end_(&udp_queue_),
       processor_(processor) {
@@ -437,25 +438,51 @@ bool UdpSocketBsd::Initialize(int listen_port) {
     RERROR("没有空闲的内部套接字");
     return false;
   }
-  int udp_fd = socket(AF_INET6, SOCK_DGRAM, 0); // Change to AF_INET6 for IPv6 support
-  if (udp_fd < 0) {
-    RERROR("socket(SOCK_DGRAM) 失败");  
-    return false;
-  }
+
   int opt = 1;
-  if (setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-    close(udp_fd);
-    RERROR("setsockopt(SO_REUSEADDR) 失败");
-    return false;
+  int udp_fd = socket(AF_INET6, SOCK_DGRAM, 0);
+  if (udp_fd >= 0) {
+    // 显式关闭 IPV6_V6ONLY。部分系统（例如 macOS）默认只收 IPv6，
+    // 不设置的话 IPv4 端点会完全不可用。
+    int v6only = 0;
+    setsockopt(udp_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+    setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in6 sin6 = {0};
+    sin6.sin6_family = AF_INET6;
+    sin6.sin6_port = htons(listen_port);
+    if (bind(udp_fd, (struct sockaddr*)&sin6, sizeof(sin6)) == 0) {
+      udp_family_ = AF_INET6;
+    } else {
+      close(udp_fd);
+      udp_fd = -1;
+    }
   }
-  struct sockaddr_in6 sin = {0}; // Use sockaddr_in6 for IPv6
-  sin.sin6_family = AF_INET6;
-  sin.sin6_port = htons(listen_port);
-  if (bind(udp_fd, (struct sockaddr*)&sin, sizeof(sin)) != 0) {
-    close(udp_fd);
-    RERROR("绑定到 udp 套接字端口 %d 失败", listen_port);
-    return false;
+
+  // IPv6 被系统禁用或绑定失败时回退 IPv4，
+  // 避免只用 IPv4 的设备因为 AF_INET6 失败而无法启动 VPN。
+  if (udp_fd < 0) {
+    udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_fd < 0) {
+      RERROR("socket(SOCK_DGRAM) 失败");
+      return false;
+    }
+    if (setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+      close(udp_fd);
+      RERROR("setsockopt(SO_REUSEADDR) 失败");
+      return false;
+    }
+    struct sockaddr_in sin4 = {0};
+    sin4.sin_family = AF_INET;
+    sin4.sin_port = htons(listen_port);
+    sin4.sin_addr.s_addr = INADDR_ANY;
+    if (bind(udp_fd, (struct sockaddr*)&sin4, sizeof(sin4)) != 0) {
+      close(udp_fd);
+      RERROR("绑定到 udp 套接字端口 %d 失败", listen_port);
+      return false;
+    }
+    udp_family_ = AF_INET;
   }
+
   fcntl(udp_fd, F_SETFD, FD_CLOEXEC);
   fcntl(udp_fd, F_SETFL, O_NONBLOCK);
   InitPollSlot(udp_fd, POLLIN);
@@ -482,12 +509,45 @@ bool UdpSocketBsd::DoRead() {
   Packet *read_packet = network_->read_packet_;
   if (read_packet == NULL)
     network_->read_packet_ = read_packet = AllocPacket();
+  if (read_packet == NULL) {
+    RERROR("分配 UDP 接收包失败");
+    return false;
+  }
 
-  sin_len = sizeof(read_packet->addr.sin6); // Use sin6 for IPv6
-  int r = recvfrom(fd_, read_packet->data, kPacketCapacity, 0,
-                   (sockaddr*)&read_packet->addr.sin6, &sin_len); // Use sin6 for IPv6
+  int r;
+  memset(&read_packet->addr, 0, sizeof(IpAddr));
+  if (udp_family_ == AF_INET6) {
+    sockaddr_in6 sin6;
+    memset(&sin6, 0, sizeof(sin6));
+    sin_len = sizeof(sin6);
+    r = recvfrom(fd_, read_packet->data, kPacketCapacity, 0,
+                 (sockaddr*)&sin6, &sin_len);
+    if (r >= 0) {
+      // 双栈 socket 收到 IPv4 包时地址是 ::ffff:a.b.c.d。
+      // 这里转回 AF_INET，保证 cookie、限流和地址比较仍按 IPv4 处理。
+      if (IN6_IS_ADDR_V4MAPPED(&sin6.sin6_addr)) {
+        read_packet->addr.sin.sin_family = AF_INET;
+        read_packet->addr.sin.sin_port = sin6.sin6_port;
+        memcpy(&read_packet->addr.sin.sin_addr, &sin6.sin6_addr.s6_addr[12], 4);
+        read_packet->sin_size = sizeof(sockaddr_in);
+      } else {
+        read_packet->addr.sin6 = sin6;
+        read_packet->sin_size = sin_len;
+      }
+    }
+  } else {
+    sockaddr_in sin4;
+    memset(&sin4, 0, sizeof(sin4));
+    sin_len = sizeof(sin4);
+    r = recvfrom(fd_, read_packet->data, kPacketCapacity, 0,
+                 (sockaddr*)&sin4, &sin_len);
+    if (r >= 0) {
+      read_packet->addr.sin = sin4;
+      read_packet->sin_size = sin_len;
+    }
+  }
+
   if (r >= 0) {
-    read_packet->sin_size = sin_len;
     read_packet->size = r;
     read_packet->protocol = kPacketProtocolUdp;
     network_->read_packet_ = NULL;
@@ -507,8 +567,33 @@ bool UdpSocketBsd::DoRead() {
 
 bool UdpSocketBsd::DoWrite() {
   assert(udp_writable_);
-  int r = sendto(fd_, udp_queue_->data, udp_queue_->size, 0,
-                 (sockaddr*)&udp_queue_->addr.sin6, sizeof(udp_queue_->addr.sin6)); // Use sin6 for IPv6
+  int r;
+  if (udp_family_ == AF_INET6) {
+    if (udp_queue_->addr.sin.sin_family == AF_INET) {
+      // AF_INET6 socket 发送 IPv4 目标时，必须转成 v4-mapped 地址。
+      sockaddr_in6 sin6;
+      memset(&sin6, 0, sizeof(sin6));
+      sin6.sin6_family = AF_INET6;
+      sin6.sin6_port = udp_queue_->addr.sin.sin_port;
+      sin6.sin6_addr.s6_addr[10] = 0xff;
+      sin6.sin6_addr.s6_addr[11] = 0xff;
+      memcpy(&sin6.sin6_addr.s6_addr[12], &udp_queue_->addr.sin.sin_addr, 4);
+      r = sendto(fd_, udp_queue_->data, udp_queue_->size, 0,
+                 (sockaddr*)&sin6, sizeof(sin6));
+    } else {
+      r = sendto(fd_, udp_queue_->data, udp_queue_->size, 0,
+                 (sockaddr*)&udp_queue_->addr.sin6, sizeof(sockaddr_in6));
+    }
+  } else {
+    if (udp_queue_->addr.sin.sin_family != AF_INET) {
+      // IPv4-only 回退 socket 无法发送 IPv6 目标。
+      RERROR("IPv4 UDP 套接字无法发送 IPv6 端点");
+      r = -1;
+    } else {
+      r = sendto(fd_, udp_queue_->data, udp_queue_->size, 0,
+                 (sockaddr*)&udp_queue_->addr.sin, sizeof(sockaddr_in));
+    }
+  }
   if (r < 0) {
     if (errno == EAGAIN) {
       udp_writable_ = false;
@@ -517,7 +602,7 @@ bool UdpSocketBsd::DoWrite() {
     }
     perror("写入 UDP 失败");
   } else {
-    if (r != udp_queue_->size)
+    if (r != (int)udp_queue_->size)
       perror("写入udp不完整！");
   }
   Packet *next = Packet_NEXT(udp_queue_);

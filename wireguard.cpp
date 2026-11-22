@@ -9,6 +9,7 @@
 #include "crypto/siphash/siphash.h"
 #include "tunsafe_endian.h"
 #include <algorithm>
+#include <vector>
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +20,9 @@
 #include "util.h"
 #ifdef _WIN32
 #include <windows.h>
-#define sleep(x) Sleep((x) * 1000)  
+// MSVC 的 alloca 声明在 malloc.h，缺这个头会编译失败。
+#include <malloc.h>
+#define sleep(x) Sleep((x) * 1000)
 #else
 #include <unistd.h>
 #endif
@@ -83,6 +86,12 @@ void WireguardProcessor::ClearTunAddress() {
 }
 
 void WireguardProcessor::AddExcludedIp(const WgCidrAddr &cidr_addr) {
+  // 同一地址可能同时来自 Endpoint 自动排除和 ExcludedIPs 配置，去重避免重复路由。
+  for (const auto &x : excluded_ips_) {
+    if (x.size == cidr_addr.size && x.cidr == cidr_addr.cidr &&
+        memcmp(x.addr, cidr_addr.addr, x.size / 8) == 0)
+      return;
+  }
   excluded_ips_.push_back(cidr_addr);
 }
 
@@ -623,108 +632,116 @@ void WireguardProcessor::ForceSendHandshakeInitiation(WgPeer *peer) {
 void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
   assert(dev_.IsMainThread());
 
-   std::string host = peer->endpoint_hostname_;
-   // 如果以 tcp:// 开头，去掉这个前缀
+  // AllowedIPs=0.0.0.0/0 会把默认路由指向 TUN。如果每次握手都同步解析
+  // Endpoint 域名或请求 HTTP 重定向，DNS/TCP 也会走 TUN，而隧道此时还没建立，
+  // 形成死锁。这里缓存解析结果，失败时继续使用上一次成功的地址。
+  uint64 now_ms = OsGetMilliseconds();
+  bool need_resolve = peer->endpoint_.sin.sin_family == 0 ||
+                      now_ms - peer->last_endpoint_resolve_ms_ > 60000;
+  if (need_resolve) {
+    peer->last_endpoint_resolve_ms_ = now_ms;
+
+    std::string host = peer->endpoint_hostname_;
+    // 如果以 tcp:// 开头，去掉这个前缀
     if (host.rfind("tcp://", 0) == 0) {
-        host = host.substr(6);
-        //RINFO("检测到 TCP 前缀，地址为: %s", host.c_str());
+      host = host.substr(6);
     }
-   // 判断是否 http/https 开头
-   if (host.rfind("http:", 0) == 0 || host.rfind("https:", 0) == 0) {
+    bool resolve_failed = false;
+    // 判断是否 http/https 开头
+    if (host.rfind("http:", 0) == 0 || host.rfind("https:", 0) == 0) {
       // 自动补 "//"
       if (host.rfind("http://", 0) != 0 && host.rfind("https://", 0) != 0) {
         auto pos = host.find(":");
         if (pos != std::string::npos) {
-           host.insert(pos + 1, "//");
+          host.insert(pos + 1, "//");
         }
       }
-      
-    std::string output = executeCurlCommand(host);
-    size_t loc_pos = output.find("Location:");
-    if (loc_pos == std::string::npos)
-      loc_pos = output.find("location:");
 
-    if (loc_pos != std::string::npos) {
-      std::string location = output.substr(loc_pos + 9);
-      location.erase(0, location.find_first_not_of(" \t\r\n"));
-      size_t endline = location.find('\n');
-      if (endline != std::string::npos) location = location.substr(0, endline);
-      location.erase(location.find_last_not_of(" \t\r\n") + 1);
-
-      if (location.rfind("http://", 0) == 0) location = location.substr(7);
-      else if (location.rfind("https://", 0) == 0) location = location.substr(8);
-      else {
-        RERROR("重定向地址格式不正确: %s", location.c_str());
-        return;
+      // 用内置 HTTP 客户端获取最终端点，不再调用 curl。
+      std::string location = FetchHttpRedirectHostPort(host, 10);
+      if (location.empty()) {
+        RERROR("无法获取 %s 的重定向地址，尝试使用上次地址", host.c_str());
+        resolve_failed = true;
+      } else {
+        host = location;
+        RINFO("获取到重定向地址: %s", host.c_str());
       }
-
-      size_t slash = location.find('/');
-      if (slash != std::string::npos) location = location.substr(0, slash);
-
-      host = location;
-      RINFO("获取到重定向地址: %s", host.c_str());
     }
-  }
 
-     size_t len = host.size() + 1;
-     char *s = (char *)alloca(len);  
-     memcpy(s, host.c_str(), len);   
-     IpAddr new_addr;
-     memset(&new_addr, 0, sizeof(IpAddr)); 
-     bool success = false;
+    if (!resolve_failed) {
+      // 用 vector 代替 alloca，避免超长 host 撑爆线程栈。
+      std::vector<char> host_buf(host.begin(), host.end());
+      host_buf.push_back('\0');
+      char *s = &host_buf[0];
+      IpAddr new_addr;
+      memset(&new_addr, 0, sizeof(IpAddr));
+      bool success = false;
 
-    if (*s == '[') {
-       char *end = strchr(s, ']');
-       if (end != NULL) {
+      if (*s == '[') {
+        char *end = strchr(s, ']');
+        if (end != NULL) {
           *end = 0;
           if (inet_pton(AF_INET6, s + 1, &new_addr.sin6.sin6_addr) == 1) {
-             char *x = strchr(end + 1, ':');
-             if (x) {
-                new_addr.sin6.sin6_family = AF_INET6;
-                new_addr.sin6.sin6_port = htons(atoi(x + 1));
-                success = true;
-             }
+            char *x = strchr(end + 1, ':');
+            uint16 port_num;
+            if (x && ParsePortNumber(x + 1, &port_num)) {
+              new_addr.sin6.sin6_family = AF_INET6;
+              new_addr.sin6.sin6_port = htons(port_num);
+              success = true;
+            } else {
+              RERROR("Endpoint 端口无效: %s", x ? x + 1 : "(none)");
+            }
           }
-       }
-    } else {
-       // ✅ 处理 IPv4 或 域名
-       char *x = strchr(s, ':');
-       if (x) {
+        }
+      } else {
+        // 处理 IPv4 或域名
+        char *x = strchr(s, ':');
+        if (x) {
           *x = 0;
           const char *host_part = s;
           const char *port_part = x + 1;
-
-          struct in_addr ipv4;
-          if (inet_pton(AF_INET, host_part, &ipv4) == 1) {
-             new_addr.sin.sin_family = AF_INET;
-             new_addr.sin.sin_addr = ipv4;
-             new_addr.sin.sin_port = htons(atoi(port_part));
+          uint16 port_num;
+          if (!ParsePortNumber(port_part, &port_num)) {
+            RERROR("Endpoint 端口无效: %s", port_part);
+          } else {
+            struct in_addr ipv4;
+            if (inet_pton(AF_INET, host_part, &ipv4) == 1) {
+              new_addr.sin.sin_family = AF_INET;
+              new_addr.sin.sin_addr = ipv4;
+              new_addr.sin.sin_port = htons(port_num);
               success = true;
-           } else {
-             // 是域名先清理dns缓存再解析
-             dns_resolver_->ClearCache();
-      	     if (!dns_resolver_) {
+            } else {
+              // 是域名，先清理当前域名的 DNS 缓存再解析。
+              // 只尝试一次，避免 DNS 走 TUN 时在重试循环里阻塞主线程。
+              if (!dns_resolver_) {
                 RERROR("dns_resolver_ 未初始化，无法解析域名: %s", host_part);
-             } else {
-                if (dns_resolver_->Resolve(host_part, &new_addr)) {
-                   new_addr.sin.sin_port = htons(atoi(port_part));
-                   success = true;
+              } else {
+                dns_resolver_->ClearCacheEntry(host_part);
+                if (dns_resolver_->Resolve(host_part, &new_addr, 0)) {
+                  new_addr.sin.sin_port = htons(port_num);
+                  success = true;
                 } else {
-                   RERROR("dns_resolver_ 无法解析域名: %s", host_part);
-               }
+                  RERROR("dns_resolver_ 无法解析域名: %s", host_part);
+                }
               }
-           }
-       }
-    }
+            }
+          }
+        }
+      }
 
-    if (success) {
-       peer->SetEndpoint(peer->endpoint_protocol_, new_addr, peer->endpoint_hostname_.c_str());
-       RINFO("已更新 %s 的 Endpoint 地址", peer->endpoint_hostname_.c_str());
+      if (success) {
+        // SetEndpoint 内部会执行 endpoint_hostname_ = hostname。
+        // 如果直接传 endpoint_hostname_.c_str() 属于自引用，std::string 的
+        // operator=(const char*) 不保证这种情况安全，先复制一份。
+        std::string endpoint_hostname_copy = peer->endpoint_hostname_;
+        peer->SetEndpoint(peer->endpoint_protocol_, new_addr, endpoint_hostname_copy.c_str());
+        RINFO("已更新 %s 的 Endpoint 地址", peer->endpoint_hostname_.c_str());
+      } else {
+        RERROR("无法更新 %s 的 Endpoint 地址，继续使用上次地址", peer->endpoint_hostname_.c_str());
+      }
     }
-    else {
-       RERROR("无法更新 %s 的 Endpoint 地址", peer->endpoint_hostname_.c_str());
-    }
-  
+  }
+
   if (!peer->CheckHandshakeRateLimit() ||
       peer->endpoint_.sin.sin_family == 0 ||
       (dev_.plugin_ && !dev_.plugin_->WantHandshake(peer)))

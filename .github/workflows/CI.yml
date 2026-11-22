@@ -3,6 +3,11 @@ name: 编译tunsafe
 on:
   push:
   workflow_dispatch:
+    inputs:
+      del:
+        description: '是否删除旧流程记录'
+        required: false
+        default: 'false'
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -53,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
      - name: Checkout code
-       uses: actions/checkout@v4
+       uses: actions/checkout@main
        
      - name: 下载linux-musl-gcc
        uses: lmq8267/dl-musl@main
@@ -82,14 +87,43 @@ jobs:
        with:
         name: tunsafe-${{ matrix.target }}
         path: tunsafe_${{ matrix.target }}
+        retention-days: 1
         
      - name: 发布Release
-       uses: softprops/action-gh-release@v2
+       uses: lmq8267/action-gh-release@master
        with:
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
            > ### ![](https://img.shields.io/badge/%E7%BC%96%E8%AF%91%E6%97%B6%E9%97%B4-${{ env.build_time }}-8267?logo=github&labelColor=%E9%A1%BB)![](https://img.shields.io/github/downloads/${{ github.repository }}/${{env.tagtime}}/total?label=%E4%B8%8B%E8%BD%BD%E6%AC%A1%E6%95%B0&logo=github) 
            
+           ### 使用说明
+
+           OpenWrt 运行时如果日志时区不对，可在启动命令前加 `TZ=utc-8` 指定中国时区：
+
+           ```sh
+           TZ=utc-8 ./tunsafe start -d -n wg0 ./wg.conf
+           ```
+
+           表示后台运行，网卡名为 `wg0`，使用 `wg.conf` 配置文件。
+
+           如果是 procd 服务，可在启动脚本中加：
+
+           ```sh
+           procd_set_param env TZ="utc-8"
+           ```
+
+           如需 TCP 协议连接，配置文件填写：
+
+           ```
+           Endpoint = tcp://abc.com:8040
+           ```
+
+           如需重定向功能，配置文件填写：
+
+           ```
+           Endpoint = tcp://http:abc.com:8040
+           ```
+
           tag_name: ${{env.tagtime}}
           files: tunsafe_${{ matrix.target }}
   del:

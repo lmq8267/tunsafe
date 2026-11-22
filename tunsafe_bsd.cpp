@@ -36,7 +36,9 @@
 #include <net/if_tun.h>
 #include <net/if_dl.h>
 #elif defined(OS_LINUX)
-#include <linux/if.h>
+// musl/OpenWrt 下 <linux/if.h> 与 <net/if.h> 冲突。
+// <net/if.h> 已由 network_bsd.cpp 包含，这里不再重复。
+// #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <sys/prctl.h>
 #include <linux/rtnetlink.h>

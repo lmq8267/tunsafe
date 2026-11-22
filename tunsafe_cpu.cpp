@@ -10,6 +10,11 @@
 
 #include <string.h>
 
+// 32 位 ARM Linux/Android 需要读取内核 HWCAP 判断是否支持 NEON，不能因为编译时链接了 NEON 汇编就假设 CPU 一定支持。
+#if (defined(OS_LINUX) || defined(OS_ANDROID)) && !defined(ARCH_CPU_ARM64)
+#include <sys/auxv.h>
+#endif
+
 static char *strcpy_e(char *dst, char *end, const char *copy) {
   size_t len = strlen(copy);
   if (len >= (size_t)(end - dst)) return end;
@@ -76,7 +81,22 @@ void PrintCpuFeatures() {
 uint32 arm_pcap[1];
 
 void InitCpuFeatures() {
+#if defined(ARCH_CPU_ARM64)
+  // AArch64 强制包含 NEON/ASIMD，不存在无 NEON 的 AArch64 CPU。
   arm_pcap[0] = 0xffffffff;
+#elif defined(OS_LINUX) || defined(OS_ANDROID)
+#if defined(OS_ANDROID) && defined(__ANDROID_API__) && __ANDROID_API__ < 18
+  // 旧 Android NDK 没有 getauxval，无法安全检测，禁用 NEON 走通用实现。
+  arm_pcap[0] = 0;
+#else
+  // ARM 32 位 Linux 的 HWCAP_NEON 是 bit 12。
+  unsigned long hwcap = getauxval(AT_HWCAP);
+  arm_pcap[0] = (hwcap & (1UL << 12)) ? 0xffffffff : 0;
+#endif
+#else
+  // iOS/macOS 的 ARM 设备均支持 NEON。
+  arm_pcap[0] = 0xffffffff;
+#endif
 }
 
 void PrintCpuFeatures() {

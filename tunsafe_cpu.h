@@ -32,11 +32,9 @@ extern uint32 x86_pcap[3];
 
 extern uint32 arm_pcap[1];
 
-#if defined(__ARM_NEON__) || defined(__ARM_NEON)
-	#define ARM_PCAP_NEON (arm_pcap[0] & (1 << 0))
-#else
-	#define ARM_PCAP_NEON 0
-#endif
+// 是否使用 NEON 由运行时检测结果决定，不能再用编译宏判断。
+// 否则在 ARMv5/ARMv6 上强行编译 NEON 汇编，运行时会触发 SIGILL。
+#define ARM_PCAP_NEON (arm_pcap[0] & (1 << 0))
 
 #endif  // defined(ARCH_CPU_ARM_FAMILY)
 

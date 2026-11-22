@@ -159,6 +159,9 @@ public:
   
 private:
   bool udp_readable_, udp_writable_;
+  // 记录 UDP socket 实际使用的地址族。
+  // 优先 AF_INET6 双栈，系统禁用 IPv6 时回退 AF_INET。
+  int udp_family_;
   Packet *udp_queue_, **udp_queue_end_;
   WireguardProcessor *processor_;
 };

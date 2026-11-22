@@ -1,16 +1,33 @@
 #include "stdafx.h"
+#include <string.h>
 #include "tunsafe_ipaddr.h"
 #include "tunsafe_dnsresolve.h"
 
 #if defined(OS_WIN)
 #include "network_win32_dnsblock.h"
 #include <malloc.h>
+// MSVC 没有 POSIX 的 popen/pclose/WEXITSTATUS，这里做兼容。
+// https 目前仍用 curl -k 回退，保证和旧版本行为一致。
+#ifndef popen
+#define popen _popen
+#endif
+#ifndef pclose
+#define pclose _pclose
+#endif
+#ifndef WEXITSTATUS
+#define WEXITSTATUS(status) (status)
+#endif
+#else
+#include <sys/wait.h>
 #endif
 
 #if defined(OS_POSIX)
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netdb.h>
+#include <fcntl.h>
+#include <errno.h>
 #endif  // defined(OS_POSIX)
 #ifdef _WIN32
 #include <windows.h>
@@ -307,7 +324,17 @@ void DnsResolver::ClearCache() {
   cache_.clear();
 }
 
-bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
+void DnsResolver::ClearCacheEntry(const char *hostname) {
+  // 只删除当前域名的缓存，避免断线重连时把其他 peer 的解析结果一并清空，造成不必要的重复 DNS 查询。
+  for (auto it = cache_.begin(); it != cache_.end(); ) {
+    if (it->name == hostname)
+      it = cache_.erase(it);
+    else
+      ++it;
+  }
+}
+
+bool DnsResolver::Resolve(const char *hostname, IpAddr *result, int max_retries) {
   static const uint8 retry_delays[] = {1, 2, 3, 5, 10, 20, 40, 60, 120, 180, 255};
   char buf[kSizeOfAddress];
 
@@ -333,7 +360,7 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
   }
 #endif  // defined(OS_WIN)
 
-  for (;;) {
+  for (int attempt = 0; ; attempt++) {
     if (g_dnsresolver_thread.Resolve(hostname, result, &token_)) {
       // add to cache
       cache_.emplace_back(hostname, *result);
@@ -341,6 +368,10 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
       return true;
     }
     if (token_.is_cancelled())
+      return false;
+    // 断线重连时 DNS 可能已经被默认路由带进未建立的隧道，
+    // 这里允许调用方限制重试次数，避免主线程卡在 255 秒的退避循环里。
+    if (max_retries >= 0 && attempt >= max_retries)
       return false;
 
     RINFO("无法解析 %s 等待 %d 秒后重试", hostname, retry_delays[retry_attempt_]);
@@ -391,7 +422,8 @@ static bool ParseIpv4WithNAT64Translation(const char *s, IpAddr *sin, int flags)
   return true;
 }
 
-// 执行curl命令并获取输出
+// 执行 curl 命令并获取输出。仅在未启用 WITH_MBEDTLS 时作为 https 回退；
+// 正常构建使用 mbedTLS，http 使用下面的内置轻量客户端。
 std::string executeCurlCommand(const std::string &url, int timeout, int max_retries) {
     std::string command = "curl -iks --max-time " + std::to_string(timeout) + " \"" + url + "\" 2>&1";
     char buffer[1280];
@@ -424,6 +456,386 @@ std::string executeCurlCommand(const std::string &url, int timeout, int max_retr
     return result;
 }
 
+// 内置轻量 HTTP 客户端，替代 curl 外部进程处理 http://。
+// 目的：不依赖 popen/system，Windows 可编译，嵌入式设备体积更小。
+// 只实现明文 http://；https 需要真正的 TLS，会显著增加体积，暂不支持。
+#if defined(OS_WIN)
+typedef SOCKET HttpSocket;
+#define kInvalidHttpSocket INVALID_SOCKET
+static void CloseHttpSocket(HttpSocket s) { closesocket(s); }
+#else
+typedef int HttpSocket;
+#define kInvalidHttpSocket (-1)
+static void CloseHttpSocket(HttpSocket s) { close(s); }
+#endif
+
+static bool HttpSetNonBlocking(HttpSocket s, bool enable) {
+#if defined(OS_WIN)
+  u_long mode = enable ? 1 : 0;
+  return ioctlsocket(s, FIONBIO, &mode) == 0;
+#else
+  int flags = fcntl(s, F_GETFL, 0);
+  if (flags < 0) return false;
+  if (enable) flags |= O_NONBLOCK; else flags &= ~O_NONBLOCK;
+  return fcntl(s, F_SETFL, flags) == 0;
+#endif
+}
+
+static bool HttpWaitSocket(HttpSocket s, bool for_write, int timeout_ms) {
+  fd_set set;
+  FD_ZERO(&set);
+  FD_SET(s, &set);
+  struct timeval tv;
+  tv.tv_sec = timeout_ms / 1000;
+  tv.tv_usec = (timeout_ms % 1000) * 1000;
+#if defined(OS_WIN)
+  int r = select(0, for_write ? NULL : &set, for_write ? &set : NULL, NULL, &tv);
+#else
+  int r = select(s + 1, for_write ? NULL : &set, for_write ? &set : NULL, NULL, &tv);
+#endif
+  return r > 0;
+}
+
+static HttpSocket HttpConnect(const std::string &host, const std::string &port, int timeout_ms) {
+#if defined(OS_WIN)
+  // 内置 HTTP 客户端也依赖 Winsock；主程序未显式初始化时这里兜底。
+  static bool winsock_ready = false;
+  if (!winsock_ready) {
+    WSADATA wsa_data;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0)
+      return kInvalidHttpSocket;
+    winsock_ready = true;
+  }
+#endif
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  struct addrinfo *res = NULL;
+  if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0)
+    return kInvalidHttpSocket;
+
+  HttpSocket fd = kInvalidHttpSocket;
+  for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+    HttpSocket s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (s == kInvalidHttpSocket)
+      continue;
+    if (!HttpSetNonBlocking(s, true)) {
+      CloseHttpSocket(s);
+      continue;
+    }
+    bool connected = false;
+    if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) {
+      connected = true;
+    } else {
+#if defined(OS_WIN)
+      int err = WSAGetLastError();
+      bool in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
+#else
+      int err = errno;
+      bool in_progress = (err == EINPROGRESS);
+#endif
+      if (in_progress && HttpWaitSocket(s, true, timeout_ms)) {
+        int so_error = 0;
+#if defined(OS_WIN)
+        int len = sizeof(so_error);
+        getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&so_error, &len);
+#else
+        socklen_t len = sizeof(so_error);
+        getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&so_error, &len);
+#endif
+        connected = (so_error == 0);
+      }
+    }
+    if (connected) {
+      HttpSetNonBlocking(s, false);
+      fd = s;
+      break;
+    }
+    CloseHttpSocket(s);
+  }
+  freeaddrinfo(res);
+  return fd;
+}
+
+static bool HttpSendAll(HttpSocket s, const std::string &data, int timeout_ms) {
+  size_t off = 0;
+  while (off < data.size()) {
+    if (!HttpWaitSocket(s, true, timeout_ms)) return false;
+    int n = send(s, data.c_str() + off, (int)(data.size() - off), 0);
+    if (n <= 0) {
+#if defined(OS_WIN)
+      if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK) continue;
+#else
+      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
+#endif
+      return false;
+    }
+    off += n;
+  }
+  return true;
+}
+
+static bool HttpRecvHeaders(HttpSocket s, std::string *headers, int timeout_ms) {
+  char buf[1024];
+  // 只读取响应头，限制 16KB，避免恶意服务器无限发送。
+  while (headers->size() < 16 * 1024) {
+    if (!HttpWaitSocket(s, false, timeout_ms)) return false;
+    int n = recv(s, buf, sizeof(buf), 0);
+    if (n <= 0) {
+#if defined(OS_WIN)
+      if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK) continue;
+#else
+      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
+#endif
+      break;  // 连接关闭，已收到的头仍然可以解析
+    }
+    headers->append(buf, n);
+    if (headers->find("\r\n\r\n") != std::string::npos)
+      return true;
+  }
+  return !headers->empty();
+}
+
+static bool HttpHeaderEquals(const char *a, const char *b, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    char ca = a[i], cb = b[i];
+    if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + ('a' - 'A'));
+    if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + ('a' - 'A'));
+    if (ca != cb) return false;
+  }
+  return true;
+}
+
+// 从响应头取出 Location。没有 Location 时返回原 host:port，
+// 这样调用方可以直接把结果当成最终端点使用。
+std::string ParseHttpRedirectHostPort(const std::string &url, const std::string &headers,
+                                     const std::string &host, const std::string &port) {
+  std::string location;
+  size_t pos = 0;
+  while (pos < headers.size()) {
+    size_t end = headers.find("\r\n", pos);
+    if (end == std::string::npos) break;
+    const char *line = headers.c_str() + pos;
+    size_t line_len = end - pos;
+    const char kLocation[] = "location";
+    if (line_len > sizeof(kLocation) - 1 &&
+        HttpHeaderEquals(line, kLocation, sizeof(kLocation) - 1) &&
+        line[sizeof(kLocation) - 1] == ':') {
+      size_t value_start = sizeof(kLocation);
+      while (value_start < line_len && (line[value_start] == ' ' || line[value_start] == '\t'))
+        value_start++;
+      location.assign(line + value_start, line_len - value_start);
+      // HTTP 头允许尾部空格，去掉后再解析 host:port。
+      size_t loc_end = location.find_last_not_of(" \t");
+      if (loc_end == std::string::npos)
+        location.clear();
+      else
+        location.erase(loc_end + 1);
+      break;
+    }
+    pos = end + 2;
+  }
+
+  if (location.empty())
+    return host + ":" + port;
+
+  // 协议相对地址 //host/path：沿用原 URL 的 scheme，端口缺省时补该 scheme 默认端口。
+  if (location.rfind("//", 0) == 0) {
+    location = location.substr(2);
+    size_t slash = location.find('/');
+    if (slash != std::string::npos)
+      location = location.substr(0, slash);
+    size_t q = location.find('?');
+    if (q != std::string::npos)
+      location = location.substr(0, q);
+    if (location.empty())
+      return "";
+    bool has_port;
+    if (location[0] == '[') {
+      size_t end = location.find(']');
+      has_port = end != std::string::npos && end + 1 < location.size() &&
+                 location[end + 1] == ':';
+    } else {
+      has_port = location.find(':') != std::string::npos;
+    }
+    if (!has_port)
+      location += (url.rfind("https://", 0) == 0) ? ":443" : ":80";
+    return location;
+  }
+
+  // 查询或片段引用：沿用原 host:port。
+  if (location[0] == '?' || location[0] == '#')
+    return host + ":" + port;
+
+  // 绝对路径：沿用原 host:port。
+  if (location[0] == '/')
+    return host + ":" + port;
+
+  std::string default_port;
+  if (location.rfind("http://", 0) == 0) {
+    location = location.substr(7);
+    default_port = "80";
+  } else if (location.rfind("https://", 0) == 0) {
+    location = location.substr(8);
+    default_port = "443";
+  } else {
+    // 没有 scheme 的绝对地址，端口缺省时沿用原端口。
+    default_port = port;
+  }
+
+  size_t slash = location.find('/');
+  if (slash != std::string::npos)
+    location = location.substr(0, slash);
+  size_t q = location.find('?');
+  if (q != std::string::npos)
+    location = location.substr(0, q);
+  size_t frag = location.find('#');
+  if (frag != std::string::npos)
+    location = location.substr(0, frag);
+  if (location.empty())
+    return "";
+
+  bool has_port;
+  if (location[0] == '[') {
+    size_t end = location.find(']');
+    has_port = end != std::string::npos && end + 1 < location.size() &&
+               location[end + 1] == ':';
+  } else {
+    has_port = location.find(':') != std::string::npos;
+  }
+  if (!has_port) {
+    if (default_port.empty())
+      default_port = (url.rfind("https://", 0) == 0) ? "443" : "80";
+    location += ":";
+    location += default_port;
+  }
+  return location;
+}
+
+std::string FetchHttpRedirectHostPort(const std::string &url, int timeout_sec) {
+  if (url.rfind("https://", 0) == 0) {
+#if defined(WITH_MBEDTLS)
+    // 使用 mbedTLS 完成 TLS 握手，不再依赖 curl。
+    return FetchHttpsRedirectHostPortMbedTls(url, timeout_sec);
+#else
+    // 未启用 mbedTLS 时保留 curl -k 回退。
+    std::string output = executeCurlCommand(url, timeout_sec, 3);
+    size_t loc_pos = output.find("Location:");
+    if (loc_pos == std::string::npos)
+      loc_pos = output.find("location:");
+    if (loc_pos == std::string::npos) {
+      RERROR("无法从 https 响应中获取重定向地址: %s", url.c_str());
+      return "";
+    }
+    std::string location = output.substr(loc_pos + 9);
+    location.erase(0, location.find_first_not_of(" \t\r\n"));
+    size_t endline = location.find('\n');
+    if (endline != std::string::npos)
+      location = location.substr(0, endline);
+    location.erase(location.find_last_not_of(" \t\r\n") + 1);
+    if (location.rfind("http://", 0) == 0)
+      location = location.substr(7);
+    else if (location.rfind("https://", 0) == 0)
+      location = location.substr(8);
+    else {
+      RERROR("重定向地址格式不正确: %s", location.c_str());
+      return "";
+    }
+    size_t slash = location.find('/');
+    if (slash != std::string::npos)
+      location = location.substr(0, slash);
+    return location;
+#endif
+  }
+  if (url.rfind("http://", 0) != 0) {
+    RERROR("不支持的 URL: %s", url.c_str());
+    return "";
+  }
+
+  const char *p = url.c_str() + 7;
+  const char *slash = strchr(p, '/');
+  const char *query = strchr(p, '?');
+  const char *frag = strchr(p, '#');
+  const char *hostport_end = slash;
+  if (!hostport_end || (query && query < hostport_end)) hostport_end = query;
+  if (!hostport_end || (frag && frag < hostport_end)) hostport_end = frag;
+  std::string hostport = hostport_end ? std::string(p, hostport_end - p) : std::string(p);
+  std::string path = slash ? std::string(slash) : std::string("/");
+  // fragment 不应发送给服务器。
+  size_t frag_pos = path.find('#');
+  if (frag_pos != std::string::npos)
+    path = path.substr(0, frag_pos);
+  if (hostport.empty()) return "";
+
+  std::string host, port;
+  if (hostport[0] == '[') {
+    size_t end = hostport.find(']');
+    if (end == std::string::npos) return "";
+    host = hostport.substr(1, end - 1);
+    if (end + 1 < hostport.size() && hostport[end + 1] == ':')
+      port = hostport.substr(end + 2);
+    else
+      port = "80";
+  } else {
+    size_t colon = hostport.rfind(':');
+    if (colon != std::string::npos) {
+      host = hostport.substr(0, colon);
+      port = hostport.substr(colon + 1);
+    } else {
+      host = hostport;
+      port = "80";
+    }
+  }
+  if (host.empty() || port.empty()) return "";
+
+  int timeout_ms = (timeout_sec > 0 ? timeout_sec : 10) * 1000;
+  HttpSocket s = HttpConnect(host, port, timeout_ms);
+  if (s == kInvalidHttpSocket) {
+    RERROR("无法连接 %s:%s", host.c_str(), port.c_str());
+    return "";
+  }
+
+  std::string request;
+  request.reserve(256);
+  request += "GET ";
+  request += path;
+  request += " HTTP/1.0\r\nHost: ";
+  // IPv6 的 Host 头必须加方括号。
+  if (host.find(':') != std::string::npos) {
+    request += "[";
+    request += host;
+    request += "]";
+  } else {
+    request += host;
+  }
+  if (port != "80") {
+    request += ":";
+    request += port;
+  }
+  request += "\r\nUser-Agent: TunSafe\r\nConnection: close\r\n\r\n";
+
+  std::string headers;
+  bool ok = HttpSendAll(s, request, timeout_ms) && HttpRecvHeaders(s, &headers, timeout_ms);
+  CloseHttpSocket(s);
+  if (!ok) {
+    RERROR("读取 %s 的 HTTP 响应失败", url.c_str());
+    return "";
+  }
+  return ParseHttpRedirectHostPort(url, headers, host, port);
+}
+
+bool ParsePortNumber(const char *s, uint16 *port) {
+  if (!s || !*s)
+    return false;
+  char *end = NULL;
+  long v = strtol(s, &end, 10);
+  if (end == s || *end != '\0' || v < 1 || v > 65535)
+    return false;
+  *port = (uint16)v;
+  return true;
+}
+
 bool ParseSockaddrInWithPort(const char *si, IpAddr *sin, DnsResolver *resolver, int flags) {
   std::string hostport = si;
   // 检查是否为 http 或 https 开头
@@ -435,6 +847,7 @@ bool ParseSockaddrInWithPort(const char *si, IpAddr *sin, DnsResolver *resolver,
     }
 
     // 调用 curl 获取 HTTP 响应头
+#if 0  // 旧的 curl 解析逻辑，已由内置 HTTP 客户端替代。
     std::string output = executeCurlCommand(hostport);
     size_t loc_pos = output.find("Location:");
     if (loc_pos == std::string::npos)
@@ -472,13 +885,21 @@ bool ParseSockaddrInWithPort(const char *si, IpAddr *sin, DnsResolver *resolver,
      // 更新最终 hostport
      hostport = location;
 
-     RINFO("获取到重定向地址: %s", hostport.c_str());
+#endif
+    // 用内置 HTTP 客户端获取最终端点；https 由 mbedTLS 处理。
+    std::string location = FetchHttpRedirectHostPort(hostport, 10);
+    if (location.empty()) {
+      RERROR("无法获取重定向地址: %s", hostport.c_str());
+      return false;
     }
+    hostport = location;
+    RINFO("获取到重定向地址: %s", hostport.c_str());
   }
   
-  size_t len = hostport.size() + 1;
-  char *s = (char *)alloca(len);
-  memcpy(s, hostport.c_str(), len); 
+  // 用 vector 代替 alloca，避免超长配置（最大 1MB）撑爆线程栈。
+  std::vector<char> hostport_buf(hostport.begin(), hostport.end());
+  hostport_buf.push_back('\0');
+  char *s = &hostport_buf[0];
   
   memset(sin, 0, sizeof(IpAddr));
   if (*s == '[') {
@@ -491,14 +912,21 @@ bool ParseSockaddrInWithPort(const char *si, IpAddr *sin, DnsResolver *resolver,
     char *x = strchr(end + 1, ':');
     if (!x)
       return false;
+    uint16 port;
+    if (!ParsePortNumber(x + 1, &port))
+      return false;
     sin->sin6.sin6_family = AF_INET6;
-    sin->sin6.sin6_port = htons(atoi(x + 1));
+    sin->sin6.sin6_port = htons(port);
     return true;
   }
   char *x = strchr(s, ':');
   if (!x) return false;
   *x = 0;
-   //RINFO("解析出IP地址: %s:%s", s, x + 1);
+  uint16 port;
+  if (!ParsePortNumber(x + 1, &port)) {
+    RERROR("端口无效: %s", x + 1);
+    return false;
+  }
   if (!ParseIpv4WithNAT64Translation(s, sin, flags)) {
     if (!resolver) {
       return false;
@@ -507,7 +935,7 @@ bool ParseSockaddrInWithPort(const char *si, IpAddr *sin, DnsResolver *resolver,
       return false;
     }
   }
-  sin->sin.sin_port = htons(atoi(x + 1));
+  sin->sin.sin_port = htons(port);
   return true;
 }
 

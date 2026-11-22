@@ -845,36 +845,23 @@ bool TunsafeServiceServer::AuthenticateUser() {
 }
 
 static void PushServiceLine(int type, const char *s) {
+  // RINFO_/RERROR_ 已经在日志内容前加了时间戳和文件行号，
+  // 这里不再重复添加 [HH:MM:SS]，避免服务日志出现两个时间。
   if (g_service) {
-    char buf[64];
-    SYSTEMTIME t;
-
     size_t l = strlen(s);
-    GetLocalTime(&t);
-    snprintf(buf, sizeof(buf), "[%.2d:%.2d:%.2d] ", t.wHour, t.wMinute, t.wSecond);
-    size_t tl = strlen(buf);
-
-    char *x = (char*) malloc(tl + l + 1);
-    memcpy(x, buf, tl);
-    memcpy(x + tl, s, l);
-    x[l + tl] = '\0';
+    char *x = (char*) malloc(l + 1);
+    if (!x)
+      return;
+    memcpy(x, s, l + 1);
     g_service->main_backend()->delegate()->OnLogLine((const char**)&x);
     free(x);
   } else {
     size_t l = strlen(s);
     char buf[1024];
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-
-    snprintf(buf, sizeof(buf), "[%.2d:%.2d:%.2d] ", t.wHour, t.wMinute, t.wSecond);
-    size_t tl = strlen(buf);
-
-    if (l >= ARRAYSIZE(buf) - tl - 1)
-      l = ARRAYSIZE(buf) - tl - 1;
-
-    memcpy(buf + tl, s, l);
-    buf[l + tl] = '\0';
-
+    if (l >= ARRAYSIZE(buf) - 1)
+      l = ARRAYSIZE(buf) - 1;
+    memcpy(buf, s, l);
+    buf[l] = '\0';
     WriteServiceLog(buf, EVENTLOG_INFORMATION_TYPE);
   }
 }

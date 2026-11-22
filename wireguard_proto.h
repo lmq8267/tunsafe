@@ -648,6 +648,11 @@ private:
   // Timestamp to detect flooding of handshakes
   uint64 last_handshake_init_recv_timestamp_;  // main thread only
 
+  // 上次重新解析 Endpoint 域名/重定向地址的时间。
+  // AllowedIPs=0.0.0.0/0 时每次握手都同步解析会形成 DNS 死锁，
+  // 因此只在地址为空或超过 60 秒时才重新解析。
+  uint64 last_endpoint_resolve_ms_;
+
   // Address of peer
   IpAddr endpoint_;
 

@@ -353,6 +353,7 @@ WgPeer::WgPeer(WgDevice *dev) {
   local_key_id_during_hs_ = 0;
   last_handshake_init_timestamp_ = -1000000ll;
   last_handshake_init_recv_timestamp_ = 0;
+  last_endpoint_resolve_ms_ = 0;
   last_complete_handskake_timestamp_ = 0;
   persistent_keepalive_ms_ = 0;
   keepalive_timeout_ms_ = KEEPALIVE_TIMEOUT_MS;

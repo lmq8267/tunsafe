@@ -107,7 +107,10 @@
 #define ARCH_CPU_MIPS_FAMILY 1
 #define ARCH_CPU_MIPSEB 1
 #define ARCH_CPU_32_BITS 1
-#define ARCH_CPU_LITTLE_ENDIAN 0
+// 必须定义 BIG_ENDIAN 而不是 LITTLE_ENDIAN=0。
+// tunsafe_endian.h 和 blake2s.cpp 用 #if defined(ARCH_CPU_LITTLE_ENDIAN) 判断，
+// 定义成 0 仍会被判定为小端，导致 mipseb 上协议字节序完全错误。
+#define ARCH_CPU_BIG_ENDIAN 1
 #elif defined(EMSCRIPTEN)
 #define ARCH_CPU_JS 1
 #define ARCH_CPU_32_BITS 1
