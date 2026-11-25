@@ -69,6 +69,7 @@ static bool IsIpv6AddressSet(const void *p) {
   return (ReadLE64(p) | ReadLE64((char*)p + 8)) != 0;
 }
 
+#if defined(_MSC_VER)
 extern "C"
 PSLIST_ENTRY __fastcall InterlockedPushListSList(
   IN PSLIST_HEADER ListHead,
@@ -80,6 +81,19 @@ PSLIST_ENTRY __fastcall InterlockedPushListSList(
 void FreePackets(Packet *packet, Packet **end, int count) {
   InterlockedPushListSList(&freelist_head, &packet->list_entry, (PSLIST_ENTRY)end, count);
 }
+#else
+// MinGW 的 kernel32 导入库没有 4 参数的 InterlockedPushListSList，
+// 逐个压入单链表即可，语义相同。
+void FreePackets(Packet *packet, Packet **end, int count) {
+  (void)end;
+  PSLIST_ENTRY cur = &packet->list_entry;
+  for (int i = 0; i < count && cur; i++) {
+    PSLIST_ENTRY next = cur->Next;
+    InterlockedPushEntrySList(&freelist_head, cur);
+    cur = next;
+  }
+}
+#endif
 
 void FreeAllPackets() {
   Packet *p;
@@ -258,7 +272,7 @@ static bool AddRoute(int family,
   row.ValidLifetime = 0xffffffff;
   row.PreferredLifetime = 0xffffffff;
   row.Metric = 100;
-  row.Protocol = MIB_IPPROTO_NETMGMT;
+  row.Protocol = (NL_ROUTE_PROTOCOL)MIB_IPPROTO_NETMGMT;
 
   DWORD error = CreateIpForwardEntry2(&row);
   if (error == NO_ERROR || error == ERROR_OBJECT_ALREADY_EXISTS) {
@@ -311,7 +325,7 @@ static bool IsRouteOriginatingFromNullRoute(MIB_IPFORWARD_ROW2 *row) {
   if (row->NextHop.si_family == AF_INET) {
     return (row->NextHop.Ipv4.sin_addr.S_un.S_addr == 0);
   } else if (row->NextHop.si_family == AF_INET6) {
-    static const uint32 nulladdr[4];
+    static const uint32 nulladdr[4] = {0};
     return memcmp(&row->NextHop.Ipv6.sin6_addr, nulladdr, 16) == 0;
   }
   return false;

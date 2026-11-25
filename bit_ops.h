@@ -15,7 +15,7 @@ static inline int _BitScanReverse64(unsigned long *index, uint64 x) {
 }
 #endif
 
-#if !defined(COMPILER_MSVC)
+#if !defined(COMPILER_MSVC) && !(defined(OS_WIN) && defined(ARCH_CPU_X86_64))
 static inline int _BitScanReverse64(unsigned long *index, uint64 x) {
   *index = 63 - __builtin_clzll(x);
   return (x != 0);

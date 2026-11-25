@@ -9,6 +9,61 @@
 
 #pragma comment (lib, "Fwpuclnt.lib")
 
+#if defined(__MINGW32__)
+// 部分 MinGW-w64 版本的 fwpmu.h 没有导出这些 WFP layer/condition GUID。
+// 这里用独立命名的静态 GUID + 宏映射，既兼容旧 MinGW，也不会和已提供
+// 这些符号的新版 MinGW 冲突。数值来自 Windows SDK fwpmu.h。
+static const GUID tunsafe_fwpm_layer_ale_auth_connect_v4 =
+    {0xc38d57d1, 0x05a7, 0x4c33, {0x90, 0x4f, 0x7f, 0xbc, 0xee, 0xe6, 0x0e, 0x82}};
+static const GUID tunsafe_fwpm_layer_ale_auth_connect_v6 =
+    {0x4a72393b, 0x319f, 0x44bc, {0x84, 0xc3, 0xba, 0x54, 0xdc, 0xb3, 0xb6, 0xb4}};
+static const GUID tunsafe_fwpm_condition_ip_remote_address =
+    {0xb235ae9a, 0x1d64, 0x49b8, {0xa4, 0x4c, 0x5f, 0xf3, 0xd9, 0x09, 0x50, 0x45}};
+static const GUID tunsafe_fwpm_condition_ip_local_interface =
+    {0x4cd62a49, 0x59c3, 0x4969, {0xb7, 0xf3, 0xbd, 0xa5, 0xd3, 0x28, 0x90, 0xa4}};
+static const GUID tunsafe_fwpm_condition_interface_type =
+    {0xdaf8cd14, 0xe09e, 0x4c93, {0xa5, 0xae, 0xc5, 0xc1, 0x3b, 0x73, 0xff, 0xca}};
+static const GUID tunsafe_fwpm_condition_ip_protocol =
+    {0x3971ef2b, 0x623e, 0x4f9a, {0x8c, 0xb1, 0x6e, 0x79, 0xb8, 0x06, 0xb9, 0xa7}};
+static const GUID tunsafe_fwpm_condition_ip_local_port =
+    {0x0c1ba1af, 0x5765, 0x453f, {0xaf, 0x22, 0xa8, 0xf7, 0x91, 0xac, 0x77, 0x5b}};
+static const GUID tunsafe_fwpm_condition_ip_remote_port =
+    {0xc35a604d, 0xd22b, 0x4e1a, {0x91, 0xb4, 0x68, 0xf6, 0x74, 0xee, 0x67, 0x4b}};
+static const GUID tunsafe_fwpm_condition_ale_app_id =
+    {0xd78e1e87, 0x8644, 0x4ea5, {0x94, 0x37, 0xd8, 0x09, 0xec, 0xef, 0xc9, 0x71}};
+
+#ifndef FWPM_LAYER_ALE_AUTH_CONNECT_V4
+#define FWPM_LAYER_ALE_AUTH_CONNECT_V4 tunsafe_fwpm_layer_ale_auth_connect_v4
+#endif
+#ifndef FWPM_LAYER_ALE_AUTH_CONNECT_V6
+#define FWPM_LAYER_ALE_AUTH_CONNECT_V6 tunsafe_fwpm_layer_ale_auth_connect_v6
+#endif
+#ifndef FWPM_CONDITION_IP_REMOTE_ADDRESS
+#define FWPM_CONDITION_IP_REMOTE_ADDRESS tunsafe_fwpm_condition_ip_remote_address
+#endif
+#ifndef FWPM_CONDITION_IP_LOCAL_INTERFACE
+#define FWPM_CONDITION_IP_LOCAL_INTERFACE tunsafe_fwpm_condition_ip_local_interface
+#endif
+#ifndef FWPM_CONDITION_INTERFACE_TYPE
+#define FWPM_CONDITION_INTERFACE_TYPE tunsafe_fwpm_condition_interface_type
+#endif
+#ifndef FWPM_CONDITION_IP_PROTOCOL
+#define FWPM_CONDITION_IP_PROTOCOL tunsafe_fwpm_condition_ip_protocol
+#endif
+#ifndef FWPM_CONDITION_IP_LOCAL_PORT
+#define FWPM_CONDITION_IP_LOCAL_PORT tunsafe_fwpm_condition_ip_local_port
+#endif
+#ifndef FWPM_CONDITION_IP_REMOTE_PORT
+#define FWPM_CONDITION_IP_REMOTE_PORT tunsafe_fwpm_condition_ip_remote_port
+#endif
+#ifndef FWPM_CONDITION_ALE_APP_ID
+#define FWPM_CONDITION_ALE_APP_ID tunsafe_fwpm_condition_ale_app_id
+#endif
+#ifndef FWPM_SESSION_FLAG_DYNAMIC
+#define FWPM_SESSION_FLAG_DYNAMIC 0x00000001
+#endif
+#endif  // defined(__MINGW32__)
+
 static const GUID TUNSAFE_DNS_SUBLAYER = {0x1ce6cce2, 0xcc8f, 0x4175, { 0xac, 0x7b, 0x95, 0xfd, 0xe8, 0x95, 0x80, 0x92}};
 static const GUID TUNSAFE_GLOBAL_BLOCK_SUBLAYER = {0x1ce6cce2, 0xcc8f, 0x4175,{0xac, 0x7b, 0x95, 0xfd, 0xe8, 0x95, 0x80, 0x93}};
 

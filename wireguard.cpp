@@ -647,8 +647,18 @@ void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
       host = host.substr(6);
     }
     bool resolve_failed = false;
-    // 判断是否 http/https 开头
-    if (host.rfind("http:", 0) == 0 || host.rfind("https:", 0) == 0) {
+    // 先处理 txt:域名 / TXT:域名，把 TXT 记录里的 ip:port 当作最终地址。
+    if (StringStartsWithNoCase(host, "txt:")) {
+      std::string endpoint = FetchTxtRecordHostPort(host.substr(4), 10);
+      if (endpoint.empty()) {
+        RERROR("无法从 TXT 记录获取 %s 的地址，尝试使用上次地址", host.c_str());
+        resolve_failed = true;
+      } else {
+        host = endpoint;
+        RINFO("从 TXT 记录获取到地址: %s", host.c_str());
+      }
+    } else if (host.rfind("http:", 0) == 0 || host.rfind("https:", 0) == 0) {
+      // 判断是否 http/https 开头
       // 自动补 "//"
       if (host.rfind("http://", 0) != 0 && host.rfind("https://", 0) != 0) {
         auto pos = host.find(":");

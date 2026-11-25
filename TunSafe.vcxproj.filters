@@ -217,6 +217,9 @@
     <ClCompile Include="tunsafe_https.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="tunsafe_dns_txt.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="network_bsd.cpp">
       <Filter>Source Files\BSD</Filter>
     </ClCompile>

@@ -21,7 +21,9 @@
 #include <exdisp.h>
 #include "tunsafe_endian.h"
 #include "util.h"
+#if defined(_MSC_VER)
 #include <atlbase.h>
+#endif
 #include <algorithm>
 #include "crypto/curve25519/curve25519-donna.h"
 #include "service_win32.h"
@@ -929,7 +931,7 @@ static void HandleClickedItem(HWND hWnd, int wParam) {
   case IDSETT_BROWSE_FILES:BrowseFiles(); break;
   case IDSETT_OPEN_FILE: BrowseFile(hWnd); break;
   case IDSETT_ABOUT:
-    MessageBoxA(g_ui_window, TUNSAFE_VERSION_STRING_LONG "\r\n\r\nCopyright © 2018, Ludvig Strigeus\r\n\r\nThanks for choosing TunSafe!\r\n\r\nThis version was built on " __DATE__ " " __TIME__, "About TunSafe", MB_ICONINFORMATION);
+    MessageBoxA(g_ui_window, TUNSAFE_VERSION_STRING_LONG "\r\n\r\nCopyright ï¿½ 2018, Ludvig Strigeus\r\n\r\nThanks for choosing TunSafe!\r\n\r\nThis version was built on " __DATE__ " " __TIME__, "About TunSafe", MB_ICONINFORMATION);
     break;
   case IDSETT_KEYPAIR:
     DialogBox(g_hinstance, MAKEINTRESOURCE(IDD_DIALOG2), hWnd, &KeyPairDlgProc);

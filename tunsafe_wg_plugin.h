@@ -1,6 +1,8 @@
 #pragma once
 #include "wireguard_proto.h"
 
+class WireguardProcessor;
+
 
 enum {
   kTokenRequestType_Mask = 0xff,

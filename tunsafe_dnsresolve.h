@@ -2,6 +2,7 @@
 #define TUNSAFE_DNSRESOLVE_H_
 
 #include <string>
+#include <vector>
 #include "tunsafe_threading.h"
 #include "tunsafe_ipaddr.h"
 
@@ -72,8 +73,34 @@ std::string HttpDecodeChunkedBody(const std::string &body);
 // 判断 chunked 响应体是否已经读到结束块（允许带 trailer）。
 bool HttpChunkedBodyComplete(const std::string &body);
 
+// 大小写不敏感地判断 text 是否以 prefix 开头。
+bool StringStartsWithNoCase(const std::string &text, const char *prefix);
+
 // 大小写不敏感地判断 text 是否包含 needle。
 bool HttpTextContainsNoCase(const std::string &text, const char *needle);
+
+// 解析 TXT 记录内容里的 ipv4:port、[ipv6]:port 或未加方括号的 ipv6:port。
+std::string ExtractTxtEndpointHostPort(const std::string &text);
+
+// 设置配置里的 DNS = 指定的服务器（TXT/A/AAAA 查询使用）。
+// 传空列表表示回到系统默认 DNS。
+void SetConfiguredDnsServers(const std::vector<std::string> &servers);
+bool HasConfiguredDnsServers();
+
+// 用配置里的 DNS 查询 A/AAAA，按 IPv4 优先返回所有地址。
+// 未配置 DNS、查询失败或 hostname 是 IP 字面量时返回 false，由调用方回退系统 DNS。
+bool ResolveHostWithConfiguredDns(const std::string &hostname,
+                                  std::vector<IpAddr> *addresses,
+                                  int timeout_ms);
+
+// 用配置里的 DNS 解析主机并格式化成数字 IP 字符串，供 HTTP/HTTPS 连接使用。
+// 未配置或解析失败时返回空列表，由调用方回退 getaddrinfo。
+void GetHostAddressStrings(const std::string &hostname, int timeout_ms,
+                           std::vector<std::string> *ips);
+
+// 查询 txt:域名 / TXT:域名的 TXT 记录，返回第一个有效的 host:port。
+// TXT 内容为 ipv4:port 或 ipv6:port；多条记录时取第一个可解析的。
+std::string FetchTxtRecordHostPort(const std::string &domain, int timeout_sec = 10);
 
 // 从 200 文本或 scheme-less 的 Location 中提取 host:port。
 // 默认只接受 IPv4 / [IPv6] 加端口（200 响应体按此规则）；

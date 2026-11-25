@@ -49,13 +49,14 @@ static DWORD InstallService(PWSTR pszServiceName,
   wchar_t szPath[MAX_PATH + 32];
   ServiceHandles handles;
   DWORD res;
+  size_t len;
 
   szPath[0] = '"';
   if (GetModuleFileNameW(NULL, szPath + 1, MAX_PATH) == 0) {
     res = GetLastError();
     goto Cleanup;
   }
-  size_t len = wcslen(szPath);
+  len = wcslen(szPath);
   memcpy(szPath + len, L"\" --service", 12 * sizeof(wchar_t));
 
   // Open the local default service control manager database
@@ -130,6 +131,7 @@ static wchar_t *GetUsernameOfCurrentUser(bool use_thread_token) {
   DWORD domain_len;
   WCHAR username[256], domain[256];
   SID_NAME_USE sid_type;
+  size_t alen, blen;
 
   if (use_thread_token) {
     if (!OpenThreadToken(GetCurrentThread(), TOKEN_ALL_ACCESS, FALSE, &thread_token))
@@ -154,8 +156,8 @@ static wchar_t *GetUsernameOfCurrentUser(bool use_thread_token) {
   if (!LookupAccountSidW(NULL, token_user->User.Sid, username, &len, domain, &domain_len, &sid_type))
     goto getout;
 
-  size_t alen = wcslen(username);
-  size_t blen = wcslen(domain);
+  alen = wcslen(username);
+  blen = wcslen(domain);
 
   result = (wchar_t*)malloc((alen + blen + 2) * sizeof(wchar_t));
   if (result) {

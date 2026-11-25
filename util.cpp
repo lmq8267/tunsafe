@@ -143,13 +143,40 @@ bool base64_decode(const uint8 *in, size_t inLen, uint8 *out, size_t *outLen) {
 
 
 
+std::string FormatCommandOutputForLog(const std::string &text) {
+  std::string result;
+  bool last_space = false;
+  const size_t kMaxLen = 512;
+  for (size_t i = 0; i < text.size() && result.size() < kMaxLen; i++) {
+    unsigned char c = (unsigned char)text[i];
+    if (c == '\r' || c == '\n') {
+      if (!result.empty() && !last_space) {
+        result += " | ";
+        last_space = true;
+      }
+      continue;
+    }
+    if (c == '\t')
+      c = ' ';
+    if (c < 0x20 || c == 0x7f)
+      continue;
+    if (c == ' ' && (last_space || result.empty()))
+      continue;
+    result += (char)c;
+    last_space = (c == ' ');
+  }
+  while (!result.empty() && (result.back() == ' ' || result.back() == '|'))
+    result.pop_back();
+  if (result.size() >= kMaxLen)
+    result += "...";
+  return result;
+}
+
 int RunCommand(const char *fmt, ...) {
-  const char *fmt_org = fmt;
   va_list va;
   std::string tmp;
   char buf[32], c;
   char *args[33];
- // char *envp[1] = {NULL};
   int nargs = 0;
   bool didadd = false;
   va_start(va, fmt);
@@ -184,30 +211,111 @@ ZERO:
   }
   args[nargs] = 0;
 
-  fprintf(stderr, "执行:");
-  for (int i = 0; args[i]; i++)
-    fprintf(stderr, " %s", args[i]);
-  fprintf(stderr, "\n");
+  std::string cmdline;
+  for (int i = 0; i < nargs; i++) {
+    if (i)
+      cmdline += ' ';
+    cmdline += args[i];
+  }
+  std::string display_cmd = FormatCommandOutputForLog(cmdline);
+
+  auto free_args = [&]() {
+    for (int i = 0; i < nargs; i++)
+      free(args[i]);
+  };
+
+  if (nargs == 0 || args[0] == NULL || args[0][0] == 0) {
+    RERROR("执行失败: 命令为空");
+    free_args();
+    return -1;
+  }
 
   int ret = -1;
-
+  std::string command_output;
+  int exit_code = -1;
 
 #if defined(OS_POSIX)
-  pid_t pid = fork();
-  if (pid == 0) {
-    execvp(args[0], args);
-    exit(127);
+  int pipefd[2] = {-1, -1};
+  if (pipe(pipefd) != 0) {
+    RERROR("执行失败: %s；原因: 创建管道失败: %s", display_cmd.c_str(), strerror(errno));
+    free_args();
+    return -1;
+  } else {
+    pid_t pid = fork();
+    if (pid == 0) {
+      close(pipefd[0]);
+      dup2(pipefd[1], STDOUT_FILENO);
+      dup2(pipefd[1], STDERR_FILENO);
+      close(pipefd[1]);
+      execvp(args[0], args);
+      fprintf(stderr, "execvp %s 失败: %s\n", args[0], strerror(errno));
+      _exit(127);
+    }
+    close(pipefd[1]);
+    pipefd[1] = -1;
+    if (pid < 0) {
+      RERROR("执行失败: %s；原因: fork 失败: %s", display_cmd.c_str(), strerror(errno));
+      close(pipefd[0]);
+      free_args();
+      return -1;
+    } else {
+      char outbuf[256];
+      for (;;) {
+        ssize_t n = read(pipefd[0], outbuf, sizeof(outbuf));
+        if (n > 0) {
+          if (command_output.size() < 2048) {
+            size_t room = 2048 - command_output.size();
+            if (room > (size_t)n)
+              room = (size_t)n;
+            command_output.append(outbuf, room);
+          }
+          continue;
+        }
+        if (n < 0 && errno == EINTR)
+          continue;
+        break;
+      }
+      close(pipefd[0]);
+      pipefd[0] = -1;
+      if (waitpid(pid, &ret, 0) != pid)
+        ret = -1;
+    }
   }
-  if (pid < 0) {
-    RERROR("Fork 失败");
-  } else if (waitpid(pid, &ret, 0) != pid) {
-    ret = -1;
+#else
+  RERROR("执行失败: %s；原因: 当前平台不支持执行命令", display_cmd.c_str());
+  free_args();
+  return -1;
+#endif
+
+  if (ret == 0) {
+    exit_code = 0;
+  }
+#if defined(OS_POSIX)
+  else if (ret > 0) {
+    if (WIFEXITED(ret))
+      exit_code = WEXITSTATUS(ret);
+    else if (WIFSIGNALED(ret))
+      exit_code = 128 + WTERMSIG(ret);
+    else
+      exit_code = ret;
   }
 #endif
 
-  if (ret != 0)
-    RERROR("创建子进程 %d!", ret);
+  std::string output = FormatCommandOutputForLog(command_output);
+  if (ret == 0) {
+    if (output.empty())
+      RINFO("执行: %s", display_cmd.c_str());
+    else
+      RINFO("执行: %s；输出: %s", display_cmd.c_str(), output.c_str());
+  } else {
+    if (output.empty())
+      RERROR("执行失败(%d): %s", exit_code, display_cmd.c_str());
+    else
+      RERROR("执行失败(%d): %s；输出: %s", exit_code, display_cmd.c_str(), output.c_str());
+  }
 
+  for (int i = 0; i < nargs; i++)
+    free(args[i]);
   return ret;
 }
 
@@ -282,8 +390,8 @@ static void FormatLogLine(char *final_buf, size_t final_size, const char *file,
 
 void RERROR_(const char *file, int line, const char *msg, ...) {
   va_list va;
-  char buf[512];
-  char final_buf[1024];
+  char buf[2048];
+  char final_buf[3072];
 
   va_start(va, msg);
   vsnprintf(buf, sizeof(buf), msg, va);
@@ -301,8 +409,8 @@ void RERROR_(const char *file, int line, const char *msg, ...) {
 
 void RINFO_(const char *file, int line, const char *msg, ...) {
   va_list va;
-  char buf[512];
-  char final_buf[1024];
+  char buf[2048];
+  char final_buf[3072];
 
   va_start(va, msg);
   vsnprintf(buf, sizeof(buf), msg, va);
@@ -359,12 +467,12 @@ void OsGetRandomBytes(uint8 *data, size_t data_size) {
 #elif defined(OS_POSIX)
   int fd = open("/dev/urandom", O_RDONLY);
   if (fd < 0) {
-    fprintf(stderr, "/dev/urandom 失败\n");
+    RERROR("/dev/urandom 打开失败: %s", strerror(errno));
     exit(1);
   }
   int r = read(fd, data, data_size);
   if (r != data_size) {
-    fprintf(stderr, "/dev/urandom 失败\n");
+    RERROR("/dev/urandom 读取失败: %s", strerror(errno));
     exit(1);
   }
   close(fd);
@@ -504,8 +612,7 @@ uint64 OsGetMilliseconds() {
 uint64 OsGetMilliseconds() {
   struct timespec ts;
   if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-    //error
-    fprintf(stderr, "clock_gettime 失败\n");
+    RERROR("clock_gettime 失败: %s", strerror(errno));
     exit(1);
   }
   return (uint64)ts.tv_sec * 1000 + (ts.tv_nsec / 1000000);

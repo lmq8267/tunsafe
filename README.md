@@ -121,7 +121,7 @@ TunSafe 使用 WireGuard 的 INI 格式，包含 `[Interface]` 和 `[Peer]` 两�
 | `Address` | 本机地址，例如 `192.168.2.2/24` |
 | `ListenPort` | UDP 监听端口 |
 | `ListenPortTCP` | TCP 监听端口 |
-| `DNS` | 连接后使用的 DNS 服务器，多个用逗号分隔 |
+| `DNS` | Endpoint 域名解析和连接后使用的 DNS 服务器，多个用逗号分隔 |
 | `MTU` | 接口 MTU |
 | `Table` | `auto` 或 `off`，是否自动添加路由 |
 | `BlockDNS` | 是否阻止 DNS 泄漏 |
@@ -138,7 +138,7 @@ TunSafe 使用 WireGuard 的 INI 格式，包含 `[Interface]` 和 `[Peer]` 两�
 | `PublicKey` | 对端公钥，必填 |
 | `PresharedKey` | 预共享密钥，可选 |
 | `AllowedIPs` | 允许走该 Peer 的网段，多个用逗号分隔，例如 `192.168.2.0/24` |
-| `Endpoint` | 对端地址，支持 UDP、TCP、HTTP/HTTPS 重定向 |
+| `Endpoint` | 对端地址，支持 UDP、TCP、HTTP/HTTPS 重定向、TXT 记录 |
 | `PersistentKeepalive` | NAT 保活间隔，单位秒 |
 | `AllowMulticast` | 是否允许组播 |
 | `Features` | 可选特性 |
@@ -171,8 +171,22 @@ PersistentKeepalive = 25
 | `Endpoint = https://abc.com:8040` | 先请求 HTTPS 重定向（mbedTLS），再连接最终地址 |
 | `Endpoint = tcp://http://abc.com:8040` | TCP + HTTP 重定向 |
 | `Endpoint = tcp://https://abc.com:8040` | TCP + HTTPS 重定向 |
+| `Endpoint = txt:abc.com` | 查询 abc.com 的 TXT 记录，内容为 ipv4:port 或 ipv6:port |
+| `Endpoint = TXT:abc.com` | 同上，`txt:` 大小写不敏感 |
+| `Endpoint = tcp://txt:abc.com` | TCP + TXT 记录解析 |
 
-断线重连时，TunSafe 会重新解析域名，并重新请求 HTTP/HTTPS 重定向地址。
+断线重连时，TunSafe 会重新解析域名、重新请求 HTTP/HTTPS 重定向地址，也会重新查询 TXT 记录。
+
+TXT 记录内容示例：
+
+```dns
+abc.com. 60 IN TXT "203.0.113.10:51820"
+abc.com. 60 IN TXT "[2001:db8::10]:51820"
+```
+
+如果 `[Interface]` 里配置了 `DNS = 8.8.8.8, 1.1.1.1`，TXT 查询会使用这里指定的 DNS；没有配置时使用系统 DNS（Linux/OpenWrt 读取 `/etc/resolv.conf`，Windows 使用系统 DNS 客户端）。TXT 记录未加方括号的 IPv6 也支持，按最后一个冒号拆分端口。
+
+配置里的 DNS 也会优先用于普通域名 Endpoint 和 HTTP/HTTPS 跳转主机的 A/AAAA 查询；这些查询失败时会回退系统 DNS，TXT 查询不回退。
 
 ## 常见问题
 

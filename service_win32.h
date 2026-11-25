@@ -7,6 +7,10 @@
 #include "network_win32_api.h"
 #include "tunsafe_threading.h"
 
+// GCC 不允许仅靠类内的 friend 声明让后面的成员声明找到该名字，显式前置声明。
+class TunsafeServiceBackend;
+class TunsafeServiceServer;
+
 // Takes care of multiple TunsafeServiceBackend
 class TunsafeServiceManager : public PipeManager::Delegate {
   friend class TunsafeServiceBackend;

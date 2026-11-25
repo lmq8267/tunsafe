@@ -42,7 +42,7 @@
 static Packet *freelist;
 
 void tunsafe_die(const char *msg) {
-  fprintf(stderr, "%s\n", msg);
+  RERROR("致命错误: %s", msg);
   exit(1);
 }
 
@@ -361,7 +361,7 @@ bool TunSocketBsd::DoRead() {
     return true;
   } else {
     if (errno != EAGAIN) {
-      fprintf(stderr, "从 tun 读取失败\n");
+      RERROR("从 tun 读取失败: %s", strerror(errno));
     }
     tun_readable_ = false;
     return false;
@@ -558,7 +558,7 @@ bool UdpSocketBsd::DoRead() {
     return true;
   } else {
     if (errno != EAGAIN) {
-      fprintf(stderr, "从 UDP 读取失败\n");
+      RERROR("从 UDP 读取失败: %s", strerror(errno));
     }
     udp_readable_ = false;
     return false;
@@ -603,10 +603,10 @@ bool UdpSocketBsd::DoWrite() {
       SetPollFlags(POLLIN | POLLOUT);
       return false;
     }
-    perror("写入 UDP 失败");
+    RERROR("写入 UDP 失败: %s", strerror(errno));
   } else {
     if (r != (int)udp_queue_->size)
-      perror("写入udp不完整！");
+      RERROR("写入 UDP 不完整: %d/%d 字节", r, (int)udp_queue_->size);
   }
   Packet *next = Packet_NEXT(udp_queue_);
   FreePacket(udp_queue_);
@@ -642,10 +642,10 @@ bool UdpSocketBsd::DoRoundRobin() {
 //////////////////////////////////////////////////////////////////////////////////////////////
 
 #if defined(OS_LINUX)
-UnixSocketDeletionWatcher::UnixSocketDeletionWatcher() 
+UnixSocketDeletionWatcher::UnixSocketDeletionWatcher()
     : inotify_fd_(-1) {
   pipes_[0] = -1;
-  pipes_[0] = -1;
+  pipes_[1] = -1;
 }
 
 UnixSocketDeletionWatcher::~UnixSocketDeletionWatcher() {
@@ -661,15 +661,31 @@ bool UnixSocketDeletionWatcher::Start(const char *path, bool *flag_to_set) {
   pid_ = getpid();
   inotify_fd_ = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
   if (inotify_fd_ == -1) {
-    perror("inotify_init1() failed");
-    return false;
+    // Tomato/老 OpenWrt 的内核可能没有 inotify_init1（返回 ENOSYS）。
+    // inotify_init 出现得更早，先用它兜底；它也不可用时改用轮询。
+    int first_error = errno;
+    RINFO("inotify_init1 不可用(%s)，尝试 inotify_init", strerror(first_error));
+    inotify_fd_ = inotify_init();
+    if (inotify_fd_ != -1) {
+      int fd_flags = fcntl(inotify_fd_, F_GETFD);
+      if (fd_flags != -1)
+        fcntl(inotify_fd_, F_SETFD, fd_flags | FD_CLOEXEC);
+      int status_flags = fcntl(inotify_fd_, F_GETFL);
+      if (status_flags != -1)
+        fcntl(inotify_fd_, F_SETFL, status_flags | O_NONBLOCK);
+    }
   }
-  if (inotify_add_watch(inotify_fd_, "/var/run/wireguard", IN_DELETE | IN_DELETE_SELF) == -1) {
-    perror("inotify_add_watch failed");
-    return false;
+  if (inotify_fd_ != -1 &&
+      inotify_add_watch(inotify_fd_, "/var/run/wireguard", IN_DELETE | IN_DELETE_SELF) == -1) {
+    // 目录不存在等情况下也不要让主循环退出，改为定时 lstat 轮询。
+    RINFO("inotify_add_watch 失败(%s)，改用轮询", strerror(errno));
+    close(inotify_fd_);
+    inotify_fd_ = -1;
   }
+  if (inotify_fd_ == -1)
+    RINFO("inotify 不可用，改用 1 秒轮询检测 Unix 套接字删除");
   if (pipe(pipes_) == -1) {
-    perror("pipe() failed");
+    RERROR("inotify 停止管道创建失败: %s", strerror(errno));
     return false;
   }
   return pthread_create(&thread_, NULL, &UnixSocketDeletionWatcher::RunThread, this) == 0;
@@ -700,19 +716,32 @@ void *UnixSocketDeletionWatcher::RunThreadInner() {
       break;
     }
     FD_ZERO(&fdset);
-    FD_SET(inotify_fd_, &fdset);
+    int max_fd = pipes_[0];
+    if (inotify_fd_ != -1) {
+      FD_SET(inotify_fd_, &fdset);
+      if (inotify_fd_ > max_fd)
+        max_fd = inotify_fd_;
+    }
     FD_SET(pipes_[0], &fdset);
-    int n = select(std::max(inotify_fd_, pipes_[0]) + 1, &fdset, NULL, NULL, NULL);
+    struct timeval tv;
+    struct timeval *timeout = NULL;
+    if (inotify_fd_ == -1) {
+      // 没有 inotify 时每秒醒来检查一次套接字是否被删除。
+      tv.tv_sec = 1;
+      tv.tv_usec = 0;
+      timeout = &tv;
+    }
+    int n = select(max_fd + 1, &fdset, NULL, NULL, timeout);
     if (n == -1) {
       if (errno == EINTR)
         continue;
-      perror("select");
+      RERROR("inotify 等待失败: %s", strerror(errno));
       break;
     }
-    if (FD_ISSET(inotify_fd_, &fdset)) {
+    if (inotify_fd_ != -1 && FD_ISSET(inotify_fd_, &fdset)) {
       ssize_t len = read(inotify_fd_, buf, sizeof(buf));
       if (len == -1) {
-        perror("read");
+        RERROR("读取 inotify 事件失败: %s", strerror(errno));
         break;
       }
     }
@@ -1026,7 +1055,7 @@ bool TcpSocketBsd::InitializeOutgoing(const IpAddr &addr) {
   writable_ = false;
 
   int fd = socket(addr.sin.sin_family, SOCK_STREAM, 0);
-  if (fd < 0) { perror("套接字：传出 TCP"); return false; }
+  if (fd < 0) { RERROR("创建传出 TCP 套接字失败: %s", strerror(errno)); return false; }
   fcntl(fd, F_SETFD, FD_CLOEXEC);
   fcntl(fd, F_SETFL, O_NONBLOCK);
 
@@ -1036,7 +1065,7 @@ bool TcpSocketBsd::InitializeOutgoing(const IpAddr &addr) {
   if (connect(fd, (sockaddr*)&endpoint_.sin,
               endpoint_.sin.sin_family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6))) {
     if (errno != EINPROGRESS) {
-      perror("连接：传出 TCP");
+      RERROR("连接传出 TCP 失败: %s", strerror(errno));
       close(fd);
       return false;
     }

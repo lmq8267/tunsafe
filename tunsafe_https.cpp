@@ -119,17 +119,26 @@ static bool NetWaitWritable(NetSocket s, int timeout_ms) {
 // 避免断线重连时把主线程卡住。
 static bool ConnectTcpWithTimeout(mbedtls_net_context *ctx, const char *host,
                                   const char *port, int timeout_ms) {
-  struct addrinfo hints;
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-  struct addrinfo *res = NULL;
-  if (getaddrinfo(host, port, &hints, &res) != 0)
-    return false;
+  std::vector<std::string> hosts;
+  GetHostAddressStrings(host, timeout_ms, &hosts);
+  bool numeric_hosts = !hosts.empty();
+  if (!numeric_hosts)
+    hosts.push_back(host);
 
   bool connected = false;
   uint64 start_ms = OsGetMilliseconds();
-  for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+  for (size_t hi = 0; hi < hosts.size(); hi++) {
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (numeric_hosts)
+      hints.ai_flags = AI_NUMERICHOST;
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(hosts[hi].c_str(), port, &hints, &res) != 0)
+      continue;
+
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
     int remaining_ms = timeout_ms - (int)(OsGetMilliseconds() - start_ms);
     if (remaining_ms <= 0)
       break;
@@ -170,8 +179,11 @@ static bool ConnectTcpWithTimeout(mbedtls_net_context *ctx, const char *host,
       break;
     }
     CloseNetSocket(s);
+    }
+    freeaddrinfo(res);
+    if (connected)
+      break;
   }
-  freeaddrinfo(res);
   return connected;
 }
 

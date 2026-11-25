@@ -8,6 +8,8 @@ bool base64_decode(const uint8 *in, size_t inLen, uint8 *out, size_t *outLen);
 bool IsOnlyZeros(const uint8 *data, size_t data_size);
 
 int RunCommand(const char *fmt, ...);
+// 把子进程输出压成一行，便于和命令本身放在同一条带时间戳的日志里。
+std::string FormatCommandOutputForLog(const std::string &text);
 typedef void Logger(int type, const char *msg);
 extern Logger *g_logger;
 

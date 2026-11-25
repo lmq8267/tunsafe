@@ -7,7 +7,11 @@
 #include <shldisp.h>
 #include <shlobj.h>
 #include <exdisp.h>
+#if defined(_MSC_VER)
 #include <atlbase.h>
+#else
+#include <shellapi.h>
+#endif
 
 const char *FindFilenameComponent(const char *s) {
   size_t len = strlen(s);
@@ -152,7 +156,7 @@ uint8* LoadFileSane(const char *name, size_t *size) {
   FILE *f = fopen(name, "rb");
   uint8 *new_file = NULL, *file = NULL;
   size_t j, i, n;
-  if (!f) return false;
+  if (!f) return NULL;
   fseek(f, 0, SEEK_END);
   long x = ftell(f);
   fseek(f, 0, SEEK_SET);
@@ -232,6 +236,7 @@ bool SanityCheckBuf(uint8 *buf, size_t n) {
   return false;
 }
 
+#if defined(_MSC_VER)
 void FindDesktopFolderView(REFIID riid, void **ppv) {
   CComPtr<IShellWindows> spShellWindows;
   spShellWindows.CoCreateInstance(CLSID_ShellWindows);
@@ -262,6 +267,7 @@ void GetDesktopAutomationObject(REFIID riid, void **ppv) {
   spsv->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(&spdispView));
   spdispView->QueryInterface(riid, ppv);
 }
+#endif  // defined(_MSC_VER)
 
 void ShellExecuteFromExplorer(
   PCSTR pszFile,
@@ -269,6 +275,7 @@ void ShellExecuteFromExplorer(
   PCSTR pszDirectory,
   PCSTR pszOperation,
   int nShowCmd) {
+#if defined(_MSC_VER)
   CComPtr<IShellFolderViewDual> spFolderView;
   GetDesktopAutomationObject(IID_PPV_ARGS(&spFolderView));
   CComPtr<IDispatch> spdispShell;
@@ -280,6 +287,11 @@ void ShellExecuteFromExplorer(
                    CComVariant(pszDirectory ? pszDirectory : ""),
                    CComVariant(pszOperation ? pszOperation : ""),
                    CComVariant(nShowCmd));
+#else
+  // MinGW 没有 ATL，直接用 ShellExecuteA；MSVC 版本是为了复用资源管理器
+  // 的 COM 自动化对象，普通打开文件/URL 用 ShellExecuteA 等价。
+  ShellExecuteA(NULL, pszOperation, pszFile, pszParameters, pszDirectory, nShowCmd);
+#endif
 }
 
 size_t GetConfigPath(char *path, size_t path_size) {

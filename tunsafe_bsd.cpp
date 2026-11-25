@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <signal.h>
+#include <sys/wait.h>
 
 #include <sys/socket.h>
 #include <net/route.h>
@@ -410,10 +411,8 @@ bool TunsafeBackendBsd::Configure(const TunConfig &&config, TunConfigOut *out) o
   char buf[kSizeOfAddress];
   char buf2[kSizeOfAddress];
 
-  if (!RunPrePostCommand(config.pre_post_commands.pre_up)) {
-    RERROR("预命令失败!");
+  if (!RunPrePostCommand(config.pre_post_commands.pre_up))
     return false;
-  }
 
   out->enable_neighbor_discovery_spoofing = false;
 
@@ -542,13 +541,54 @@ void TunsafeBackendBsd::SetTunDeviceName(const char *name) {
 }
 
 static bool RunOneCommand(const std::string &cmd) {
-  RINFO("Run: %s", cmd.c_str());
-  int exit_code = system(cmd.c_str());
-  if (exit_code) {
-    RERROR("执行失败 (%d) : %s", exit_code, cmd.c_str());
+  std::string shell = "( " + cmd + " ) 2>&1";
+  FILE *fp = popen(shell.c_str(), "r");
+  if (!fp) {
+    RERROR("执行失败: %s；原因: 启动 shell 失败: %s", cmd.c_str(), strerror(errno));
     return false;
   }
-  return true;
+  std::string output;
+  char buf[256];
+  for (;;) {
+    size_t n = fread(buf, 1, sizeof(buf), fp);
+    if (n > 0) {
+      if (output.size() < 2048) {
+        size_t room = 2048 - output.size();
+        if (room > n)
+          room = n;
+        output.append(buf, room);
+      }
+      continue;
+    }
+    if (ferror(fp) && errno == EINTR) {
+      clearerr(fp);
+      continue;
+    }
+    break;
+  }
+  int status = pclose(fp);
+  int exit_code = -1;
+  if (status != -1) {
+    if (WIFEXITED(status))
+      exit_code = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))
+      exit_code = 128 + WTERMSIG(status);
+    else
+      exit_code = status;
+  }
+  std::string out = FormatCommandOutputForLog(output);
+  if (exit_code == 0) {
+    if (out.empty())
+      RINFO("执行: %s", cmd.c_str());
+    else
+      RINFO("执行: %s；输出: %s", cmd.c_str(), out.c_str());
+    return true;
+  }
+  if (out.empty())
+    RERROR("执行失败(%d): %s", exit_code, cmd.c_str());
+  else
+    RERROR("执行失败(%d): %s；输出: %s", exit_code, cmd.c_str(), out.c_str());
+  return false;
 }
 
 bool TunsafeBackendBsd::RunPrePostCommand(const std::vector<std::string> &vec) {
@@ -569,11 +609,12 @@ void SignalCatcher::SigAlrm(int sig) {
 }
 
 void SignalCatcher::SigInt(int sig) {
+  (void)sig;
   if (did_ctrlc)
     exit(1);
   did_ctrlc = true;
-  write(1, "检测到 Ctrl+C 退出.再按一次强制退出.\n", sizeof("检测到 Ctrl+C 退出.再按一次强制退出.\n") - 1);
-  // todo: fix signal safety?
+  // 这里只设置标志，由主循环输出带时间戳的日志，避免在信号处理函数里
+  // 调用非异步信号安全的日志函数。
   if (g_signal_catcher)
     *g_signal_catcher->exit_flag_ = true;
 }
@@ -608,7 +649,7 @@ SignalCatcher::SignalCatcher(bool *exit_flag, bool *sigalarm_flag) {
   sigemptyset(&mask);
   sigaddset(&mask, SIGALRM);
   if (sigprocmask(SIG_BLOCK, &mask, &orig_signal_mask_) < 0) {
-    perror("sigprocmask");
+    RERROR("sigprocmask 失败: %s", strerror(errno));
     return;
   }
 
@@ -747,6 +788,8 @@ void TunsafeBackendBsdImpl::RunLoop() {
 
   SignalCatcher signal_catcher(network_.exit_flag(), network_.sigalarm_flag());
   network_.RunLoop(&signal_catcher.orig_signal_mask_);
+  if (did_ctrlc)
+    RINFO("检测到 Ctrl+C 退出.再按一次强制退出.");
   unix_socket_listener_.Stop();
 
   tun_interface_gone_ = tun_.tun_interface_gone();
@@ -784,7 +827,8 @@ void TunsafeBackendBsdImpl::OnConnectionRetry(uint32 attempts) {
 
 void TunsafeBackendBsdImpl::OnRequestToken(WgPeer *peer, uint32 type) {
   if (!g_daemon_mode) {
-    fprintf(stderr, "登录需要两步验证. 请输入您的身份验证器的值.\nToken: ");
+    RINFO("登录需要两步验证. 请输入您的身份验证器的值.");
+    fprintf(stderr, "Token: ");
     char buf[100], *rv;
     while (!(rv = fgets(buf, 100, stdin)) && errno == EINTR) {}
     if (rv) {
@@ -854,9 +898,9 @@ int main(int argc, char **argv) {
   if (cmd.daemon) {
     g_daemon_mode = true;
 
-    fprintf(stderr, "切换到守护进程模式...\n");
+    RINFO("切换到守护进程模式...");
     if (daemon(0, 0) == -1)
-      perror("daemon() 失败");
+      RERROR("daemon() 失败: %s", strerror(errno));
   }
 
   backend.RunLoop();

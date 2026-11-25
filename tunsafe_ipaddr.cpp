@@ -362,10 +362,25 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result, int max_retries)
 #endif  // defined(OS_WIN)
 
   for (int attempt = 0; ; attempt++) {
-    if (g_dnsresolver_thread.Resolve(hostname, result, &token_)) {
+    bool used_configured_dns = false;
+    bool resolved = false;
+    // 配置了 DNS = 时优先使用它解析 Endpoint 域名；失败后仍回退系统 DNS，
+    // 保证配置 DNS 未覆盖的公网域名（如 HTTP 跳转服务）也能解析。
+    if (HasConfiguredDnsServers()) {
+      std::vector<IpAddr> addresses;
+      if (ResolveHostWithConfiguredDns(hostname, &addresses, 2000) && !addresses.empty()) {
+        *result = addresses[0];
+        used_configured_dns = true;
+        resolved = true;
+      }
+    }
+    if (!resolved)
+      resolved = g_dnsresolver_thread.Resolve(hostname, result, &token_);
+    if (resolved) {
       // add to cache
       cache_.emplace_back(hostname, *result);
-      RINFO("已将 %s 解析为 %s%s", hostname, PrintIpAddr(*result, buf), "");
+      RINFO("已将 %s 解析为 %s%s", hostname, PrintIpAddr(*result, buf),
+            used_configured_dns ? " (配置 DNS)" : "");
       return true;
     }
     if (token_.is_cancelled())
@@ -508,17 +523,26 @@ static HttpSocket HttpConnect(const std::string &host, const std::string &port, 
     winsock_ready = true;
   }
 #endif
-  struct addrinfo hints;
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-  struct addrinfo *res = NULL;
-  if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0)
-    return kInvalidHttpSocket;
+  std::vector<std::string> hosts;
+  GetHostAddressStrings(host, timeout_ms, &hosts);
+  bool numeric_hosts = !hosts.empty();
+  if (!numeric_hosts)
+    hosts.push_back(host);
 
   HttpSocket fd = kInvalidHttpSocket;
   uint64 start_ms = OsGetMilliseconds();
-  for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+  for (size_t hi = 0; hi < hosts.size(); hi++) {
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (numeric_hosts)
+      hints.ai_flags = AI_NUMERICHOST;
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(hosts[hi].c_str(), port.c_str(), &hints, &res) != 0)
+      continue;
+
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
     int remaining_ms = timeout_ms - (int)(OsGetMilliseconds() - start_ms);
     if (remaining_ms <= 0)
       break;
@@ -558,8 +582,11 @@ static HttpSocket HttpConnect(const std::string &host, const std::string &port, 
       break;
     }
     CloseHttpSocket(s);
+    }
+    freeaddrinfo(res);
+    if (fd != kInvalidHttpSocket)
+      break;
   }
-  freeaddrinfo(res);
   return fd;
 }
 
@@ -697,7 +724,7 @@ bool HttpChunkedBodyComplete(const std::string &body) {
   return false;
 }
 
-static bool HttpStartsWithNoCase(const std::string &s, const char *prefix) {
+bool StringStartsWithNoCase(const std::string &s, const char *prefix) {
   size_t n = strlen(prefix);
   if (s.size() < n)
     return false;
@@ -737,9 +764,9 @@ std::string ExtractEndpointHostPort(const std::string &text, bool allow_hostname
   size_t whitespace = value.find_first_of(" \t\r\n");
   if (whitespace != std::string::npos)
     value.resize(whitespace);
-  if (HttpStartsWithNoCase(value, "http://"))
+  if (StringStartsWithNoCase(value, "http://"))
     value = value.substr(7);
-  else if (HttpStartsWithNoCase(value, "https://"))
+  else if (StringStartsWithNoCase(value, "https://"))
     value = value.substr(8);
   // 去掉路径、查询和片段，只保留主机和端口。
   size_t cut = value.find_first_of("/?#");
@@ -784,8 +811,8 @@ std::string ExtractEndpointHostPort(const std::string &text, bool allow_hostname
 // 配置里允许 http:host/path 这种省略 // 的写法，统一补成完整 URL；
 // 同时把大写 scheme 规范成小写，后续解析只认小写。
 static std::string NormalizeHttpUrl(const std::string &url) {
-  bool is_https = HttpStartsWithNoCase(url, "https:");
-  bool is_http = !is_https && HttpStartsWithNoCase(url, "http:");
+  bool is_https = StringStartsWithNoCase(url, "https:");
+  bool is_http = !is_https && StringStartsWithNoCase(url, "http:");
   if (!is_http && !is_https)
     return "";
   std::string rest = url.substr(is_https ? 6 : 5);
@@ -1231,8 +1258,17 @@ bool ParsePortNumber(const char *s, uint16 *port) {
 
 bool ParseSockaddrInWithPort(const char *si, IpAddr *sin, DnsResolver *resolver, int flags) {
   std::string hostport = si;
-  // 检查是否为 http 或 https 开头
-  if (hostport.rfind("http:", 0) == 0 || hostport.rfind("https:", 0) == 0) {
+  // 先处理 txt:域名 / TXT:域名，把 TXT 记录里的 ip:port 当作最终地址。
+  if (StringStartsWithNoCase(hostport, "txt:")) {
+    std::string endpoint = FetchTxtRecordHostPort(hostport.substr(4), 10);
+    if (endpoint.empty()) {
+      RERROR("无法从 TXT 记录获取地址: %s", si);
+      return false;
+    }
+    hostport = endpoint;
+    RINFO("从 TXT 记录获取到地址: %s", hostport.c_str());
+  } else if (hostport.rfind("http:", 0) == 0 || hostport.rfind("https:", 0) == 0) {
+    // 检查是否为 http 或 https 开头
     if (hostport.rfind("http:", 0) == 0 && hostport.substr(5, 2) != "//") {
       hostport.insert(5, "//");
     } else if (hostport.rfind("https:", 0) == 0 && hostport.substr(6, 2) != "//") {

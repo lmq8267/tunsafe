@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include "wireguard_config.h"
 #include "wireguard.h"
+#include "tunsafe_dnsresolve.h"
 #include "util.h"
 #include <stdlib.h>
 #include <string.h>
@@ -314,11 +315,91 @@ static void AddEndpointExcludedIp(WireguardProcessor *wg, const IpAddr &sin) {
   wg->AddExcludedIp(addr);
 }
 
+// 在正式解析前先扫一遍 [Interface] 的 DNS =，因为 Endpoint 可能写在
+// DNS 之前；TXT/A/AAAA 解析需要提前知道该用哪个 DNS 服务器。
+static void CollectConfiguredDnsServers(const char *buf, size_t buf_size,
+                                        std::vector<std::string> *servers) {
+  if (!buf || buf_size == 0)
+    return;
+  std::string text(buf, buf_size);
+  bool in_interface = false;
+  size_t pos = 0;
+  while (pos <= text.size()) {
+    size_t line_end = text.find('\n', pos);
+    bool last_line = line_end == std::string::npos;
+    if (last_line)
+      line_end = text.size();
+    std::string line = text.substr(pos, line_end - pos);
+    pos = line_end + 1;
+
+    size_t comment = line.find('#');
+    if (comment != std::string::npos)
+      line.resize(comment);
+    size_t begin = 0;
+    size_t end = line.size();
+    while (begin < end && is_space((uint8_t)line[begin]))
+      begin++;
+    while (end > begin && is_space((uint8_t)line[end - 1]))
+      end--;
+    line = line.substr(begin, end - begin);
+
+    if (!line.empty()) {
+      if (line[0] == '[') {
+        in_interface = line == "[Interface]";
+      } else if (in_interface) {
+        size_t eq = line.find('=');
+        if (eq != std::string::npos) {
+          size_t key_end = eq;
+          while (key_end > 0 && is_space((uint8_t)line[key_end - 1]))
+            key_end--;
+          if (line.substr(0, key_end) == "DNS") {
+            std::string value = line.substr(eq + 1);
+            size_t start = 0;
+            for (;;) {
+              size_t comma = value.find(',', start);
+              if (comma == std::string::npos)
+                comma = value.size();
+              std::string item = value.substr(start, comma - start);
+              size_t ib = 0, ie = item.size();
+              while (ib < ie && is_space((uint8_t)item[ib]))
+                ib++;
+              while (ie > ib && is_space((uint8_t)item[ie - 1]))
+                ie--;
+              item = item.substr(ib, ie - ib);
+              if (!item.empty()) {
+                std::vector<char> item_buf(item.begin(), item.end());
+                item_buf.push_back('\0');
+                IpAddr sin;
+                if (ParseSockaddrInWithoutPort(&item_buf[0], &sin, NULL,
+                                               kParseSockaddrDontDoNAT64)) {
+                  char ip[kSizeOfAddress];
+                  PrintIpAddr(sin, ip);
+                  if (ip[0])
+                    servers->push_back(ip);
+                }
+              }
+              if (comma == value.size())
+                break;
+              start = comma + 1;
+            }
+          }
+        }
+      }
+    }
+    if (last_line)
+      break;
+  }
+}
+
 bool ParseWireGuardConfigString(WireguardProcessor *wg, const char *bufin, size_t buf_size, DnsResolver *dns_resolver) {
   char group[32] = {0};
   std::string buf2 = bufin;
   char *buf = &buf2[0];
-  
+
+  std::vector<std::string> configured_dns_servers;
+  CollectConfiguredDnsServers(bufin, buf_size, &configured_dns_servers);
+  SetConfiguredDnsServers(configured_dns_servers);
+
   WgFileParser file_parser(wg, dns_resolver);
   
   const char *buf_end = buf + buf_size;

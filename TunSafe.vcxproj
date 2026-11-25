@@ -107,7 +107,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies);ws2_32.lib;Iphlpapi.lib;mbedtls.lib;mbedx509.lib;mbedcrypto.lib</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies);ws2_32.lib;Iphlpapi.lib;mbedtls.lib;mbedx509.lib;mbedcrypto.lib;Dnsapi.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>third_party\mbedtls\build\library\$(Configuration);third_party\mbedtls\library\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
@@ -125,7 +125,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies);ws2_32.lib;Iphlpapi.lib;mbedtls.lib;mbedx509.lib;mbedcrypto.lib;Comctl32.lib</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies);ws2_32.lib;Iphlpapi.lib;mbedtls.lib;mbedx509.lib;mbedcrypto.lib;Dnsapi.lib;Comctl32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>third_party\mbedtls\build\library\$(Configuration);third_party\mbedtls\library\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalManifestDependencies>
       </AdditionalManifestDependencies>
@@ -149,7 +149,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies);ws2_32.lib;Iphlpapi.lib;mbedtls.lib;mbedx509.lib;mbedcrypto.lib</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies);ws2_32.lib;Iphlpapi.lib;mbedtls.lib;mbedx509.lib;mbedcrypto.lib;Dnsapi.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>third_party\mbedtls\build\library\$(Configuration);third_party\mbedtls\library\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
@@ -176,7 +176,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies);ws2_32.lib;Iphlpapi.lib;mbedtls.lib;mbedx509.lib;mbedcrypto.lib</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies);ws2_32.lib;Iphlpapi.lib;mbedtls.lib;mbedx509.lib;mbedcrypto.lib;Dnsapi.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>third_party\mbedtls\build\library\$(Configuration);third_party\mbedtls\library\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
@@ -264,6 +264,7 @@
     <ClCompile Include="network_win32_dnsblock.cpp" />
     <ClCompile Include="tunsafe_ipaddr.cpp" />
     <ClCompile Include="tunsafe_https.cpp" />
+    <ClCompile Include="tunsafe_dns_txt.cpp" />
     <ClCompile Include="tunsafe_threading.cpp" />
     <ClCompile Include="tunsafe_wg_plugin.cpp" />
     <ClCompile Include="util.cpp" />
