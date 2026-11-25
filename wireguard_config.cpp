@@ -207,7 +207,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
         // ExcludedIPs 也允许写域名。配置加载阶段默认路由还没有指向 TUN，
         // 此时解析域名是安全的；多 A 记录当前只取第一个。
         IpAddr sin;
-        if (!ParseSockaddrInWithoutPort(ss[i], &sin, dns_resolver_, kParseSockaddrDontDoNAT64)) {
+        if (!ParseSockaddrInWithoutPort(ss[i], &sin, dns_resolver_, kParseSockaddrDontDoNAT64, 0)) {
           RERROR("ExcludedIPs 无法解析: %s", ss[i]);
           continue;
         }

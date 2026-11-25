@@ -39,7 +39,7 @@ enum {
   kParseSockaddrDontDoNAT64 = 1,
 };
 bool ParseSockaddrInWithPort(const char *s, IpAddr *sin, DnsResolver *resolver, int flags = 0);
-bool ParseSockaddrInWithoutPort(char *s, IpAddr *sin, DnsResolver *resolver, int flags = 0);
+bool ParseSockaddrInWithoutPort(char *s, IpAddr *sin, DnsResolver *resolver, int flags = 0, int max_retries = -1);
 
 // Returns nonzero if two endpoints are different.
 uint32 CompareIpAddr(const IpAddr *a, const IpAddr *b);

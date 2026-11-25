@@ -588,6 +588,9 @@ bool UdpSocketBsd::DoWrite() {
     if (udp_queue_->addr.sin.sin_family != AF_INET) {
       // IPv4-only 回退 socket 无法发送 IPv6 目标。
       RERROR("IPv4 UDP 套接字无法发送 IPv6 端点");
+      // 必须显式设置 errno，否则后面的 EAGAIN 判断可能复用上一次
+      // recvfrom() 留下的值，导致包卡在队列头一直重试。
+      errno = EAFNOSUPPORT;
       r = -1;
     } else {
       r = sendto(fd_, udp_queue_->data, udp_queue_->size, 0,
